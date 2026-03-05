@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 load_dotenv()
 TOKEN = os.getenv("CHANNEL_ACCESS_TOKEN")
 # 填入你剛才拿到的：richmenu-ID
-RICH_MENU_ID = "richmenu-5f6e94e21532fff36cbda07e8368386b" 
+RICH_MENU_ID = "richmenu-0661c63130d18fb63b40b6db5a1fddad" 
 # 圖片檔案路徑 (建議 2500x1686)
 IMAGE_PATH = "admin_menu2.jpg" 
 

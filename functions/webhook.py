@@ -75,12 +75,13 @@ def _get_line_profile(user_id: str, access_token: str) -> str:
         return "未知使用者"
 
 def _get_user_info(service, sheet_id: str, user_id: str):
-    user_rows = _read_values(service, sheet_id, "USERS!A:E")
+    user_rows = _read_values(service, sheet_id, "USERS!A:F") # 讀取到 F 欄
     for r in reversed(user_rows):
         if len(r) >= 4 and r[1] == user_id:
             role = str(r[4]).strip() if len(r) >= 5 else ""
-            return r[2], r[3], role
-    return None, None, ""
+            phone = str(r[5]).strip() if len(r) >= 6 else "" # 取得 F 欄電話
+            return r[2], r[3], role, phone # 回傳四個值
+    return None, None, "", ""
 
 # =========================
 # Webhook 主程式
@@ -110,10 +111,10 @@ def line_webhook(req: https_fn.Request) -> Response:
             try:
                 service = _get_sheets_service()
                 # 這裡直接呼叫您寫好的工具函式取得角色
-                _, _, user_role = _get_user_info(service, sheet_id, user_id)
+                _, _, user_role, _ = _get_user_info(service, sheet_id, user_id)
                 
                 # 管理者選單 ID (您剛產生的新 ID)
-                ADMIN_MENU_ID = "richmenu-5f6e94e21532fff36cbda07e8368386b"
+                ADMIN_MENU_ID = "richmenu-0661c63130d18fb63b40b6db5a1fddad"
                 
                 # 統一權限清單
                 ADMIN_ROLES = ["老闆", "超級管理員", "ADMIN"]
@@ -170,136 +171,46 @@ def _handle_reports(reply_token: str, user_id: str, text: str, access_token: str
     sheet_id = os.getenv("SHEET_ID", "")
     service = _get_sheets_service()
 
-    display_name, user_unit, user_role = _get_user_info(service, sheet_id, user_id)
+    # 1. 取得資訊 (修正：接收 4 個變數)
+    display_name, user_unit, user_role, user_phone = _get_user_info(service, sheet_id, user_id)
 
-    # 1. 權限防護網
+    # 2. 權限檢查
     if text == "老闆結單" and user_role not in ["老闆", "超級管理員", "ADMIN"]:
-        _reply_text(reply_token, "⛔ 您沒有老闆權限，無法查看廚房總單喔！")
+        _reply_text(reply_token, "⛔ 您沒有權限查看老闆結單。")
         return
     if text == "全部明細" and user_role not in ["超級管理員", "ADMIN"]:
-        _reply_text(reply_token, "⛔ 此為超級管理員專用指令，權限不足！")
+        _reply_text(reply_token, "⛔ 此為超級管理員專用指令。")
         return
     if text == "單位明細" and not user_unit:
-        _reply_text(reply_token, "⛔ 您尚未綁定單位，無法查看明細喔！請先完成綁定。")
+        _reply_text(reply_token, "⛔ 您尚未綁定單位，無法查看明細。")
         return
 
-    # 2. 抓取今日「所有」有效的餐點 Session ID
     tw_tz = timezone(timedelta(hours=8))
     today_str = datetime.now(tw_tz).strftime("%Y-%m-%d")
 
-    logs = _read_values(service, sheet_id, "logs!A:E")
-    today_sessions = set()
-    
-    for r in reversed(logs):
-        if len(r) >= 5 and r[3] == "PUBLISH_MENU":
-            try:
-                payload = json.loads(r[4])
-                if payload.get("date") == today_str:
-                    sid = f"{payload.get('date')}_{payload.get('meal')}"
-                    today_sessions.add(sid)
-            except: continue
-
-    if not today_sessions:
-        _reply_text(reply_token, "📝 今天目前沒有發布任何菜單紀錄喔！")
-        return
-
-    # 3. 撈取訂單紀錄，並篩選出屬於今日 Session 的訂單
-    # 👇 修改：這裡加入了狀態過濾邏輯
+    # 3. 撈取今日所有有效訂單
     orders = _read_values(service, sheet_id, "orders_log!A:J")
-    today_orders = []
+    today_orders = [o for o in orders if len(o) >= 10 and o[9] != "已取消" and today_str in o[1]]
     
-    for o in orders:
-        # 基本資料欄位不足就跳過
-        if len(o) < 2: continue
-        
-        # 1. 檢查是否為今日場次
-        if o[1] not in today_sessions: continue
-        
-        # 2. 檢查狀態 (J欄 = index 9)，若為 "已取消" 則跳過
-        # 若資料長度不足 10，視為未取消 (可能是舊資料或未填寫)
-        status = o[9] if len(o) >= 10 else ""
-        if status == "已取消":
-            continue
-            
-        today_orders.append(o)
-
     if not today_orders:
-        _reply_text(reply_token, "📝 今天還沒有人點餐喔！(或訂單皆已取消)")
+        _reply_text(reply_token, "📝 今日尚無訂單資料。")
         return
 
-    # 4. 將訂單依照 Session (餐別) 進行分組
-    session_orders_map = {sid: [] for sid in today_sessions}
-    for o in today_orders:
-        sid = o[1]
-        if sid in session_orders_map:
-            session_orders_map[sid].append(o)
+    messages_to_send = []
 
-    # 5. 排序 Session：讓午餐 (LUNCH) 排在晚餐 (DINNER) 前面
-    sorted_sessions = sorted(list(today_sessions), reverse=True) 
-
-    final_reply = ""
-
-    # 6. 迴圈產生每個餐別的報表
-    for sid in sorted_sessions:
-        current_orders = session_orders_map[sid]
-        if not current_orders: continue 
-        
-        meal_name = "午餐" if "LUNCH" in sid else "晚餐"
-        
-        section_msg = ""
-        section_total = 0
-
-        # ==========================
-        # 📝 報表 A：老闆結單 (合併版 - 午餐在上，晚餐在下)
-        # ==========================
-        if text == "老闆結單":
-            lunch_counts = {}
-            dinner_counts = {}
-            unit_totals = {}
-            grand_total = 0
-
-            # 統計邏輯 (注意：today_orders 已經排除已取消的單了)
-            for o in today_orders:
-                sid_inner, unit, item, price = o[1], o[2], o[5], int(o[7])
-                unit_totals[unit] = unit_totals.get(unit, 0) + price
-                grand_total += price
-
-                if "LUNCH" in sid_inner:
-                    lunch_counts[item] = lunch_counts.get(item, 0) + 1
-                elif "DINNER" in sid_inner:
-                    dinner_counts[item] = dinner_counts.get(item, 0) + 1
-
-            msg = f"🍱 【{today_str}】\n"
-            msg += "-" * 15 + "\n"
-
-            if lunch_counts:
-                # msg += "☀️ [午餐]\n" # 可選：是否顯示標題
-                for item, count in lunch_counts.items():
-                    msg += f"🔸 {item}：{count} 份\n"
-                
-            if lunch_counts and dinner_counts:
-                msg += "-" * 15 + "\n"
-
-            if dinner_counts:
-                # msg += "🌙 [晚餐]\n" # 可選：是否顯示標題
-                for item, count in dinner_counts.items():
-                    msg += f"🔸 {item}：{count} 份\n"
-
-            msg += "-" * 15 + "\n"
-            msg += f"💰 應收 (本日合計 ${grand_total})\n"
-            for unit, total in unit_totals.items():
-                msg += f"  🏢 {unit}：${total}\n"
+    # ==========================
+    # 📝 報表 A：單位明細 (第一則訊息)
+    # ==========================
+    if text == "單位明細":
+        unit_msg = ""
+        for m_type in ["LUNCH", "DINNER"]:
+            m_name = "午餐" if m_type == "LUNCH" else "晚餐"
+            sid_prefix = f"{today_str}_{m_type}"
             
-            _reply_text(reply_token, msg.strip())
-            return
-
-        # ==========================
-        # 報表 B：單位明細
-        # ==========================
-        elif text == "單位明細":
-            unit_orders = [o for o in current_orders if o[2] == user_unit]
+            unit_orders = [o for o in today_orders if o[1] == sid_prefix and o[2] == user_unit]
             if not unit_orders: continue
 
+            section_total = sum(int(o[7]) for o in unit_orders)
             user_totals = {}
             for o in unit_orders:
                 name, item, price = o[4], o[5], int(o[7])
@@ -307,53 +218,90 @@ def _handle_reports(reply_token: str, user_id: str, text: str, access_token: str
                     user_totals[name] = {"items": [], "total": 0}
                 user_totals[name]["items"].append(item)
                 user_totals[name]["total"] += price
-                section_total += price
 
-            section_msg += f"\n🏢 【{today_str} {meal_name}】\n"
-            section_msg += f"本餐總金額：${section_total}\n" + "-" * 15 + "\n"
+            unit_msg += f"🏢 【{today_str} {m_name}】\n"
+            unit_msg += f"本餐總金額：${section_total}\n" + "-" * 15 + "\n"
             for name, data in user_totals.items():
-                items_str = ", ".join(data["items"])
-                section_msg += f"👤 {name}：{items_str} (${data['total']})\n"
+                unit_msg += f"👤 {name}：{', '.join(data['items'])} (${data['total']})\n"
+            unit_msg += "\n"
 
-        # ==========================
-        # 報表 C：全部明細
-        # ==========================
-        elif text == "全部明細":
-            grouped_orders = {}
-            for o in current_orders:
-                unit, name, item, price = o[2], o[4], o[5], int(o[7])
-                if unit not in grouped_orders:
-                    grouped_orders[unit] = {"users": {}, "total": 0}
-                if name not in grouped_orders[unit]["users"]:
-                    grouped_orders[unit]["users"][name] = {"items": [], "total": 0}
-                    
-                grouped_orders[unit]["users"][name]["items"].append(item)
-                grouped_orders[unit]["users"][name]["total"] += price
-                grouped_orders[unit]["total"] += price
-                section_total += price
+        if unit_msg:
+            messages_to_send.append({"type": "text", "text": unit_msg.strip()})
+        
+        # ⚠️ 自動觸發第二則：老闆結單
+        text = "老闆結單" 
 
-            section_msg += f"\n👑 【{today_str} {meal_name} 全署明細】\n"
-            section_msg += f"本餐總金額：${section_total}\n" + "=" * 15 + "\n"
+    # ==========================
+    # 📝 報表 B：老闆結單 (第二則訊息)
+    # ==========================
+    if text == "老闆結單":
+        lunch_counts, dinner_counts = {}, {}
+        unit_totals = {}
+        grand_total = 0
+
+        for o in today_orders:
+            # 如果是從單位明細進來的，只統計點擊者所屬單位
+            if o[2] != user_unit: continue 
             
-            for unit, unit_data in grouped_orders.items():
-                section_msg += f"🏢 [{unit}] (小計 ${unit_data['total']})\n"
-                for name, user_data in unit_data["users"].items():
-                    items_str = ", ".join(user_data["items"])
-                    section_msg += f"  👤 {name}：{items_str} (${user_data['total']})\n"
-                section_msg += "-" * 15 + "\n"
+            sid_inner, item, price = o[1], o[5], int(o[7])
+            unit_totals[o[2]] = unit_totals.get(o[2], 0) + price
+            grand_total += price
 
-        final_reply += section_msg
+            if "LUNCH" in sid_inner:
+                lunch_counts[item] = lunch_counts.get(item, 0) + 1
+            elif "DINNER" in sid_inner:
+                dinner_counts[item] = dinner_counts.get(item, 0) + 1
 
-    if not final_reply:
-        _reply_text(reply_token, f"📝 查詢完畢，但【{text}】目前沒有符合條件的訂單資料喔！")
-        return
+        phone_display = f"(電話：{user_phone})" if user_phone else ""
+        boss_msg = f"🍱 【{today_str}】{phone_display}\n"
+        boss_msg += "-" * 15 + "\n"
 
-    _reply_text(reply_token, final_reply.strip())
+        for item, count in lunch_counts.items(): boss_msg += f"🔸 {item}：{count} 份\n"
+        if lunch_counts and dinner_counts: boss_msg += "-" * 15 + "\n"
+        for item, count in dinner_counts.items(): boss_msg += f"🔸 {item}：{count} 份\n"
+
+        boss_msg += "-" * 15 + "\n"
+        boss_msg += f"💰 應收 (本日合計 ${grand_total})\n"
+        for unit, total in unit_totals.items():
+            boss_msg += f"  🏢 {unit}：${total}\n"
+        
+        messages_to_send.append({"type": "text", "text": boss_msg.strip()})
+
+    # ==========================
+    # 📝 報表 C：全部明細 (管理員專用)
+    # ==========================
+    elif text == "全部明細":
+        all_msg = f"👑 【{today_str} 全署明細】\n" + "=" * 15 + "\n"
+        grand_total = 0
+        grouped = {}
+
+        for o in today_orders:
+            unit, name, item, price = o[2], o[4], o[5], int(o[7])
+            if unit not in grouped: grouped[unit] = {"users": {}, "total": 0}
+            if name not in grouped[unit]["users"]: grouped[unit]["users"][name] = {"items": [], "total": 0}
+            
+            grouped[unit]["users"][name]["items"].append(item)
+            grouped[unit]["users"][name]["total"] += price
+            grouped[unit]["total"] += price
+            grand_total += price
+
+        for unit, u_data in grouped.items():
+            all_msg += f"🏢 [{unit}] (小計 ${u_data['total']})\n"
+            for name, p_data in u_data["users"].items():
+                all_msg += f"  👤 {name}：{', '.join(p_data['items'])} (${p_data['total']})\n"
+            all_msg += "-" * 15 + "\n"
+        
+        all_msg += f"💰 總計金額：${grand_total}"
+        messages_to_send.append({"type": "text", "text": all_msg.strip()})
+
+    # 4. 最終發送
+    if messages_to_send:
+        _send_line_payload({"replyToken": reply_token, "messages": messages_to_send}, access_token)
 
 def _handle_reports_menu(reply_token: str, user_id: str, access_token: str):
     service = _get_sheets_service()
     sheet_id = os.getenv("SHEET_ID", "")
-    _, user_unit, user_role = _get_user_info(service, sheet_id, user_id)
+    _, user_unit, user_role, _ = _get_user_info(service, sheet_id, user_id)
     
     role = str(user_role).strip().upper() # 轉大寫去空格
     ADMIN_ROLES = ["老闆", "超級管理員", "ADMIN"]
@@ -518,7 +466,7 @@ def _handle_order(reply_token: str, user_id: str, text: str, access_token: str):
 
         sheet_id = os.getenv("SHEET_ID", "")
         service = _get_sheets_service()
-        display_name, user_unit, _ = _get_user_info(service, sheet_id, user_id)
+        display_name, user_unit, _, _ = _get_user_info(service, sheet_id, user_id)
 
         if not user_unit:
             # 這裡把抓到的 target_meal 傳給綁定流程
@@ -866,30 +814,6 @@ def _handle_cancel_order(reply_token: str, user_id: str, text: str, access_token
     except Exception as e:
         print(f"Cancel Error: {e}")
         _reply_text(reply_token, "取消失敗，請稍後再試。")
-
-def check_and_set_rich_menu(user_id):
-    """檢查使用者角色並設定對應的圖文選單"""
-    # 1. 從 USERS 工作表讀取資料
-    # 假設你已定義好讀取 Google Sheets 的工具函式
-    df_users = get_sheet_data("USERS") 
-    
-    # 2. 尋找該 user_id 的角色
-    user_row = df_users[df_users['lineUserId'] == user_id]
-    
-    # 預設選單 ID (可在 LINE_SETTING 工作表定義)
-    USER_MENU_ID = "richmenu-xxxxxxxxuser" 
-    ADMIN_MENU_ID = "richmenu-yyyyyyyyadmin"
-    
-    if not user_row.empty:
-        role = user_row.iloc[0]['角色']
-        if role == 'ADMIN':
-            # 綁定管理員選單
-            line_bot_api.link_rich_menu_to_user(user_id, ADMIN_MENU_ID)
-            return "ADMIN"
-    
-    # 若非管理員或查無資料，綁定一般選單
-    line_bot_api.link_rich_menu_to_user(user_id, USER_MENU_ID)
-    return "USER"
 
 def _sync_rich_menu(user_id, reply_token=None):
     """根據 USERS 工作表同步使用者的圖文選單"""
