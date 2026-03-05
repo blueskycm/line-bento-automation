@@ -1,0 +1,169 @@
+html {
+  font-size: 20px;
+}
+
+body {
+  background: #f0f2f5;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  padding-bottom: var(--sticky-h, 120px);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.card {
+  border: 0;
+  border-radius: 16px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
+  margin-bottom: 20px;
+}
+
+.card-body {
+  padding: 1.25rem;
+}
+
+.form-label {
+  font-size: 0.95rem;
+  color: #555;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.form-control,
+.form-select {
+  font-size: 1rem;
+  min-height: 52px;
+  border-radius: 12px;
+  padding: 10px 16px;
+}
+
+.btn {
+  font-size: 1.05rem;
+  min-height: 52px;
+  border-radius: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 600;
+}
+
+.icon-btn {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  font-size: 1.4rem;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+.list-item {
+  padding: 1rem 0.5rem;
+  border: 0;
+  border-bottom: 1px solid #eee;
+  cursor: pointer;
+}
+
+.list-item:last-child {
+  border-bottom: 0;
+}
+
+.list-item:active {
+  background-color: #f8f9fa;
+}
+
+.form-check-input {
+  width: 1.5em;
+  height: 1.5em;
+  border: 2px solid #adb5bd;
+  margin-top: 0;
+  margin-right: 12px;
+}
+
+.form-check-input:checked {
+  background-color: #0d6efd;
+  border-color: #0d6efd;
+}
+
+.sticky-bar {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: white;
+  padding: 15px;
+  /* 增加頂部陰影，視覺上與內容分開 */
+  box-shadow: 0 -5px 15px rgba(0, 0, 0, 0.1);
+  z-index: 9999;
+}
+
+/* 確保容器本身不被強制設置高度，而是靠內距或墊片撐開 */
+.container {
+  max-width: 600px;
+  margin: 0 auto;
+}
+
+.chip {
+  background: #e9ecef;
+  padding: 4px 12px;
+  border-radius: 20px;
+  font-weight: 700;
+  font-size: 0.9rem;
+}
+
+.price-badge {
+  font-size: 1.1rem !important;
+  padding: 8px 12px !important;
+  color: #198754;
+  background-color: #e8f5e9 !important;
+  border: 1px solid #c3e6cb !important;
+}
+
+.section-head {
+  background: #f8f9fa;
+  border-bottom: 1px solid #eee;
+  border-top-left-radius: 16px;
+  border-top-right-radius: 16px;
+}
+
+.sticky-tools {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: white;
+  border-bottom: 1px solid #eee;
+}
+
+/* 鎖定日期與時間選擇器的字體，不隨系統縮放過度變形 */
+input[type="date"],
+input[type="time"] {
+  /* 解決你收到的編輯器警告 */
+  -webkit-appearance: none;
+  appearance: none;
+
+  font-variant-numeric: tabular-nums;
+  /* 讓時間數字寬度一致，閱讀更整齊 */
+}
+
+/* 針對日期選擇器的字體微調 */
+.date-input-custom {
+  font-size: 0.85rem !important;
+  /* 稍微縮小，避免擠爆 */
+  padding: 10px 4px !important;
+}
+
+/* 針對時間選擇器的強化顯示 */
+.time-input-24h {
+  font-size: 1.15rem !important;
+  font-weight: bold;
+  color: #0d6efd;
+}
+
+/* 針對 iOS 可能出現的 AM/PM 顯示優化 */
+input[type="time"]::-webkit-datetime-edit-ampm-field {
+  font-size: 0.8em;
+  color: #888;
+}
+
+/* 日期字體縮小時，稍微調整內距防止文字切到 */
+input[type="date"] {
+  padding: 10px 4px !important;
+}

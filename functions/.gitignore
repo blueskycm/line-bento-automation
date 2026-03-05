@@ -1,0 +1,16 @@
+# Python bytecode
+__pycache__/
+
+# Python virtual environment
+venv/
+*.local
+.venv/
+env/
+
+# Python 快取與編譯檔
+*.py[cod]
+*$py.class
+
+# 函數專屬環境變數
+.env
+serviceAccount.json

@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "@line/liff": "^2.27.3",
+    "bootstrap": "^5.3.8"
+  }
+}
