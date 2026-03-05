@@ -11,17 +11,17 @@ TOKEN = os.getenv("CHANNEL_ACCESS_TOKEN")
 rich_menu_data = {
     "size": {"width": 2500, "height": 1686},
     "selected": False,
-    "name": "管理者選單-六格",
+    "name": "管理者選單-六格2",
     "chatBarText": "管理員功能",
     "areas": [
-        # 第一排
+        # 第一排(使用者)
         {"bounds": {"x": 0, "y": 0, "width": 833, "height": 843}, "action": {"type": "message", "text": "今日午餐"}},
         {"bounds": {"x": 833, "y": 0, "width": 833, "height": 843}, "action": {"type": "message", "text": "今日晚餐"}},
         {"bounds": {"x": 1666, "y": 0, "width": 834, "height": 843}, "action": {"type": "message", "text": "修改訂單"}},
-        # 第二排
-        {"bounds": {"x": 0, "y": 843, "width": 833, "height": 843}, "action": {"type": "message", "text": "老闆結單"}},
-        {"bounds": {"x": 833, "y": 843, "width": 833, "height": 843}, "action": {"type": "message", "text": "全部明細"}},
-        {"bounds": {"x": 1666, "y": 843, "width": 834, "height": 843}, "action": {"type": "uri", "uri": "https://liff.line.me/2009191430-uamSkSal"}}
+        # 第二排(管理者)
+        {"bounds": {"x": 0, "y": 843, "width": 833, "height": 843}, "action": {"type": "message", "text": "數據報表"}}, # 老闆結單改為數據報表
+        {"bounds": {"x": 833, "y": 843, "width": 833, "height": 843}, "action": {"type": "uri", "uri": "https://docs.google.com/spreadsheets/d/1Qpv6V4Mb856iy87mTWGSkzevCjpdsrn1NmjYceoi9Ns/edit?usp=sharing"}}, # 全部明細改為 Google Sheet 連結
+        {"bounds": {"x": 1666, "y": 843, "width": 834, "height": 843}, "action": {"type": "uri", "uri": "https://liff.line.ee/2009191430-uamSkSal"}}
     ]
 }
 

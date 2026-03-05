@@ -5,10 +5,10 @@ from dotenv import load_dotenv
 # 1. 設定區
 load_dotenv()
 TOKEN = os.getenv("CHANNEL_ACCESS_TOKEN")
-# 填入你剛才拿到的：richmenu-8622a5eb0c952142aa3750952dfbe272
-RICH_MENU_ID = "richmenu-8622a5eb0c952142aa3750952dfbe272" 
+# 填入你剛才拿到的：richmenu-ID
+RICH_MENU_ID = "richmenu-5f6e94e21532fff36cbda07e8368386b" 
 # 圖片檔案路徑 (建議 2500x1686)
-IMAGE_PATH = "admin_menu.jpg" 
+IMAGE_PATH = "admin_menu2.jpg" 
 
 def upload_rich_menu_image():
     # 注意：上傳檔案的 URL 是 api-data 開頭

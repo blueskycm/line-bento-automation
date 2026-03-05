@@ -105,29 +105,22 @@ def line_webhook(req: https_fn.Request) -> Response:
         user_id = event.get("source", {}).get("userId")
         event_type = event.get("type")
 
-        # --- 自動切換選單邏輯 (僅針對 follow 或特定 admin 動作) ---
-        # 建議：為了效能，可以只在 follow 時同步，或是管理者傳送訊息時同步
+        # --- 自動切換選單邏輯 ---
         if user_id and (event_type == "follow" or (event_type == "message" and event.get("message", {}).get("type") == "text")):
             try:
                 service = _get_sheets_service()
-                # 讀取 USERS 工作表 (B 欄 userId, E 欄角色)
-                users_data = _read_values(service, sheet_id, "USERS!A:E")
+                # 這裡直接呼叫您寫好的工具函式取得角色
+                _, _, user_role = _get_user_info(service, sheet_id, user_id)
                 
-                user_role = "USER"
-                if users_data:
-                    for row in users_data:
-                        if len(row) >= 5 and row[1] == user_id:
-                            user_role = row[4]
-                            break
+                # 管理者選單 ID (您剛產生的新 ID)
+                ADMIN_MENU_ID = "richmenu-5f6e94e21532fff36cbda07e8368386b"
                 
-                # 你建立成功的管理者 ID
-                ADMIN_MENU_ID = "richmenu-8622a5eb0c952142aa3750952dfbe272"
+                # 統一權限清單
+                ADMIN_ROLES = ["老闆", "超級管理員", "ADMIN"]
                 
-                if user_role == "ADMIN":
-                    # 執行綁定管理者選單
+                if user_role in ADMIN_ROLES:
                     _link_rich_menu(user_id, ADMIN_MENU_ID)
                 else:
-                    # 一般使用者解除個人綁定，回歸 Manager 後台設定的「預設選單」
                     _unlink_rich_menu(user_id)
             except Exception as e:
                 print(f"Rich Menu Sync Error: {e}")
@@ -358,37 +351,21 @@ def _handle_reports(reply_token: str, user_id: str, text: str, access_token: str
     _reply_text(reply_token, final_reply.strip())
 
 def _handle_reports_menu(reply_token: str, user_id: str, access_token: str):
-    """
-    整合報表指令，依權限顯示快速回覆按鈕
-    """
-    sheet_id = os.getenv("SHEET_ID", "")
     service = _get_sheets_service()
-    
-    # 取得使用者角色資訊
+    sheet_id = os.getenv("SHEET_ID", "")
     _, user_unit, user_role = _get_user_info(service, sheet_id, user_id)
     
+    role = str(user_role).strip().upper() # 轉大寫去空格
+    ADMIN_ROLES = ["老闆", "超級管理員", "ADMIN"]
+    
     quick_reply_items = []
-
-    # 1. 單位明細 (有綁定單位即可看)
     if user_unit:
-        quick_reply_items.append({
-            "type": "action",
-            "action": {"type": "message", "label": "🏢 單位明細", "text": "單位明細"}
-        })
-
-    # 2. 老闆結單 (管理者權限)
-    if user_role in ["老闆", "超級管理員", "ADMIN"]:
-        quick_reply_items.append({
-            "type": "action",
-            "action": {"type": "message", "label": "🍱 老闆結單", "text": "老闆結單"}
-        })
-
-    # 3. 全部明細 (超級管理員)
-    if user_role in ["超級管理員", "ADMIN"]:
-        quick_reply_items.append({
-            "type": "action",
-            "action": {"type": "message", "label": "👑 全部明細", "text": "全部明細"}
-        })
+        quick_reply_items.append({"type": "action", "action": {"type": "message", "label": "🏢 單位明細", "text": "單位明細"}})
+    
+    if any(r in role for r in ADMIN_ROLES) or role in ADMIN_ROLES:
+        quick_reply_items.append({"type": "action", "action": {"type": "message", "label": "🍱 老闆結單", "text": "老闆結單"}})
+        # 雖然圖文選單有網址，但快速回覆裡保留文字指令作為備援
+        quick_reply_items.append({"type": "action", "action": {"type": "message", "label": "👑 全部明細", "text": "全部明細"}})
 
     if not quick_reply_items:
         _reply_text(reply_token, "⚠️ 您目前沒有權限查看報表，請先完成單位綁定。")
