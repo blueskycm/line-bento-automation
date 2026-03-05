@@ -160,7 +160,12 @@ def line_webhook(req: https_fn.Request) -> Response:
             elif text == "修改訂單":
                 _handle_modify_order(reply_token, user_id, text, channel_access_token)
             
+            elif text == "數據報表":
+                # 點擊圖文選單時，先彈出選擇按鈕
+                _handle_reports_menu(reply_token, user_id, channel_access_token)
+
             elif text in ["老闆結單", "單位明細", "全部明細"]:
+                # 當使用者點擊快速回覆的按鈕後，才執行原本的報表邏輯
                 _handle_reports(reply_token, user_id, text, channel_access_token)
 
     return Response("OK", status=200)
@@ -351,6 +356,55 @@ def _handle_reports(reply_token: str, user_id: str, text: str, access_token: str
         return
 
     _reply_text(reply_token, final_reply.strip())
+
+def _handle_reports_menu(reply_token: str, user_id: str, access_token: str):
+    """
+    整合報表指令，依權限顯示快速回覆按鈕
+    """
+    sheet_id = os.getenv("SHEET_ID", "")
+    service = _get_sheets_service()
+    
+    # 取得使用者角色資訊
+    _, user_unit, user_role = _get_user_info(service, sheet_id, user_id)
+    
+    quick_reply_items = []
+
+    # 1. 單位明細 (有綁定單位即可看)
+    if user_unit:
+        quick_reply_items.append({
+            "type": "action",
+            "action": {"type": "message", "label": "🏢 單位明細", "text": "單位明細"}
+        })
+
+    # 2. 老闆結單 (管理者權限)
+    if user_role in ["老闆", "超級管理員", "ADMIN"]:
+        quick_reply_items.append({
+            "type": "action",
+            "action": {"type": "message", "label": "🍱 老闆結單", "text": "老闆結單"}
+        })
+
+    # 3. 全部明細 (超級管理員)
+    if user_role in ["超級管理員", "ADMIN"]:
+        quick_reply_items.append({
+            "type": "action",
+            "action": {"type": "message", "label": "👑 全部明細", "text": "全部明細"}
+        })
+
+    if not quick_reply_items:
+        _reply_text(reply_token, "⚠️ 您目前沒有權限查看報表，請先完成單位綁定。")
+        return
+
+    payload = {
+        "replyToken": reply_token,
+        "messages": [
+            {
+                "type": "text",
+                "text": "📊 請選擇您要查看的報表：",
+                "quickReply": {"items": quick_reply_items[:13]}
+            }
+        ]
+    }
+    _send_line_payload(payload, access_token)
 
 # =========================
 # 彈出綁定快捷按鈕
