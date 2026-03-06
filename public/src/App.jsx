@@ -102,12 +102,12 @@ export default function App() {
         remainingText = remainingText.replace(dMatch[0], "");
       }
 
-      // 2. 特殊處理：多種尺寸斜線價格 => 酸辣湯25/50/100 或 貢丸湯30/50
-      const slashRegex = /([^，,。\n]+?)\s*(\d+(?:\/\d+)+)/g;
+      // 2. 特殊處理：多種尺寸斜線價格 => 酸辣湯25/50/100 或 貢丸湯30／50 (支援全型)
+      const slashRegex = /([^，,。\n]+?)\s*(\d+(?:[\/／\\＼]\d+)+)/g;
       let sMatch;
       while ((sMatch = slashRegex.exec(remainingText)) !== null) {
         const baseName = sMatch[1].trim();
-        const prices = sMatch[2].split("/").map(Number); // ["25", "50", "100"]
+        const prices = sMatch[2].split(/[\/／\\＼]/).map(Number); // ["25", "50", "100"]
 
         // 智慧判斷尺寸標籤：2個預設小/大，3個預設小/中/大
         let sizeLabels = ["小", "大"];
