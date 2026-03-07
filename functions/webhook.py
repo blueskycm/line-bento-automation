@@ -92,7 +92,6 @@ def line_webhook(req: https_fn.Request) -> Response:
     channel_access_token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "")
     sheet_id = os.getenv("SHEET_ID", "")
 
-    # 驗證 Signature
     body_str = req.get_data(as_text=True)
     signature = req.headers.get("X-Line-Signature", "")
     hash_val = hmac.new(channel_secret.encode('utf-8'), body_str.encode('utf-8'), hashlib.sha256).digest()
@@ -113,7 +112,7 @@ def line_webhook(req: https_fn.Request) -> Response:
                 # 這裡直接呼叫您寫好的工具函式取得角色
                 _, _, user_role, _ = _get_user_info(service, sheet_id, user_id)
                 
-                # 管理者選單 ID (您剛產生的新 ID)
+                # 管理者選單 ID
                 ADMIN_MENU_ID = "richmenu-0661c63130d18fb63b40b6db5a1fddad"
                 
                 # 統一權限清單
@@ -131,6 +130,38 @@ def line_webhook(req: https_fn.Request) -> Response:
             text = event["message"]["text"].strip()
             reply_token = event.get("replyToken")
 
+            # ==========================================
+            # 優先處理「純數字」：這必須是第一個判斷！
+            # ==========================================
+            if text.isdigit():
+                service = _get_sheets_service()
+                # 讀取狀態表
+                states_rows = _read_values(service, sheet_id, "user_states!A:B")
+                # 確保 user_id 字串比對正確
+                user_state_data = next((r for r in states_rows if len(r) > 1 and str(r[0]).strip() == str(user_id).strip()), None)
+                
+                if user_state_data and user_state_data[1].startswith("SET_QTY|"):
+                    _, meal, item_num = user_state_data[1].split("|")
+                    qty = int(text)
+                    
+                    # 1. 立即清除狀態
+                    _set_user_state(service, sheet_id, user_id, "")
+                    
+                    # 2. 取得用戶資訊
+                    display_name, user_unit, _, _ = _get_user_info(service, sheet_id, user_id)
+                    
+                    # 3. 執行點餐並強制結束 Webhook 請求
+                    if user_unit:
+                        _execute_order(reply_token, user_id, display_name, user_unit, int(item_num), 
+                                       channel_access_token, service, sheet_id, 
+                                       target_meal_type=meal, quantity=qty)
+                    else:
+                        _prompt_binding(reply_token, channel_access_token, 
+                                        pending_item=int(item_num), 
+                                        pending_meal=meal, 
+                                        pending_qty=qty)
+                    return Response("OK", status=200)
+
             # 根據關鍵字分流處理
             if "餐 開團囉！" in text:
                 meal_type = "LUNCH" if "午餐" in text else "DINNER"
@@ -138,6 +169,15 @@ def line_webhook(req: https_fn.Request) -> Response:
 
             elif text in ["今日午餐", "今日晚餐"]:
                 _handle_show_menu(reply_token, text)
+
+            elif text.startswith("手動輸入點餐 "):
+                service = _get_sheets_service()
+                _handle_manual_input_trigger(reply_token, user_id, text, service, sheet_id)
+            elif text.startswith("我要訂 "):
+                m = re.match(r"我要訂 (LUNCH|DINNER) (\d+) 數量是 (\d+)", text)
+                if m:
+                    meal, item_num, qty = m.groups()
+                    _handle_order(reply_token, user_id, f"點餐 {meal} {item_num} {qty}", channel_access_token)
 
             elif text.startswith("點餐 "):
                 _handle_order(reply_token, user_id, text, channel_access_token)
@@ -154,12 +194,13 @@ def line_webhook(req: https_fn.Request) -> Response:
             elif text == "修改訂單":
                 _handle_modify_order(reply_token, user_id, text, channel_access_token)
             
+            elif text.startswith("選擇數量 "):
+                _handle_select_quantity(reply_token, text)
+            
             elif text == "數據報表":
-                # 點擊圖文選單時，先彈出選擇按鈕
                 _handle_reports_menu(reply_token, user_id, channel_access_token)
 
             elif text in ["老闆結單", "單位明細", "全部明細"]:
-                # 當使用者點擊快速回覆的按鈕後，才執行原本的報表邏輯
                 _handle_reports(reply_token, user_id, text, channel_access_token)
 
     return Response("OK", status=200)
@@ -210,14 +251,16 @@ def _handle_reports(reply_token: str, user_id: str, text: str, access_token: str
             unit_orders = [o for o in today_orders if o[1] == sid_prefix and o[2] == user_unit]
             if not unit_orders: continue
 
-            section_total = sum(int(o[7]) for o in unit_orders)
+            # 修改：加總 o[8] (小計)
+            section_total = sum(int(o[8]) for o in unit_orders)
             user_totals = {}
             for o in unit_orders:
-                name, item, price = o[4], o[5], int(o[7])
+                # o[4]: 姓名, o[5]: 品項, o[6]: 數量, o[8]: 小計
+                name, item, qty, subtotal = o[4], o[5], int(o[6]), int(o[8])
                 if name not in user_totals:
                     user_totals[name] = {"items": [], "total": 0}
-                user_totals[name]["items"].append(item)
-                user_totals[name]["total"] += price
+                user_totals[name]["items"].append(f"{item} x{qty}")
+                user_totals[name]["total"] += subtotal
 
             unit_msg += f"🏢 【{today_str} {m_name}】\n"
             unit_msg += f"本餐總金額：${section_total}\n" + "-" * 15 + "\n"
@@ -227,9 +270,7 @@ def _handle_reports(reply_token: str, user_id: str, text: str, access_token: str
 
         if unit_msg:
             messages_to_send.append({"type": "text", "text": unit_msg.strip()})
-        
-        # ⚠️ 自動觸發第二則：老闆結單
-        text = "老闆結單" 
+        text = "老闆結單" # 自動連鎖顯示老闆結單 
 
     # ==========================
     # 📝 報表 B：老闆結單 (第二則訊息)
@@ -240,20 +281,23 @@ def _handle_reports(reply_token: str, user_id: str, text: str, access_token: str
         grand_total = 0
 
         for o in today_orders:
-            # 如果是從單位明細進來的，只統計點擊者所屬單位
-            if o[2] != user_unit: continue 
+            if text == "老闆結單" and "🏢" not in (messages_to_send[0]["text"] if messages_to_send else ""):
+                pass
+            elif o[2] != user_unit: 
+                continue 
             
-            sid_inner, item, price = o[1], o[5], int(o[7])
-            unit_totals[o[2]] = unit_totals.get(o[2], 0) + price
-            grand_total += price
+            # o[1]: session, o[5]: 品項, o[6]: 數量, o[8]: 小計
+            sid_inner, item, qty, subtotal = o[1], o[5], int(o[6]), int(o[8])
+            unit_totals[o[2]] = unit_totals.get(o[2], 0) + subtotal
+            grand_total += subtotal
 
             if "LUNCH" in sid_inner:
-                lunch_counts[item] = lunch_counts.get(item, 0) + 1
+                lunch_counts[item] = lunch_counts.get(item, 0) + qty # 修改：累加數量
             elif "DINNER" in sid_inner:
-                dinner_counts[item] = dinner_counts.get(item, 0) + 1
+                dinner_counts[item] = dinner_counts.get(item, 0) + qty # 修改：累加數量
 
         phone_display = f"(電話：{user_phone})" if user_phone else ""
-        boss_msg = f"🍱 【{today_str}】{phone_display}\n"
+        boss_msg = f"🍱 【{today_str} 統計】{phone_display}\n"
         boss_msg += "-" * 15 + "\n"
 
         for item, count in lunch_counts.items(): boss_msg += f"🔸 {item}：{count} 份\n"
@@ -261,7 +305,7 @@ def _handle_reports(reply_token: str, user_id: str, text: str, access_token: str
         for item, count in dinner_counts.items(): boss_msg += f"🔸 {item}：{count} 份\n"
 
         boss_msg += "-" * 15 + "\n"
-        boss_msg += f"💰 應收 (本日合計 ${grand_total})\n"
+        boss_msg += f"💰 應收合計：${grand_total}\n"
         for unit, total in unit_totals.items():
             boss_msg += f"  🏢 {unit}：${total}\n"
         
@@ -275,16 +319,23 @@ def _handle_reports(reply_token: str, user_id: str, text: str, access_token: str
         grand_total = 0
         grouped = {}
 
+        # 遍歷今日所有有效訂單
         for o in today_orders:
-            unit, name, item, price = o[2], o[4], o[5], int(o[7])
-            if unit not in grouped: grouped[unit] = {"users": {}, "total": 0}
-            if name not in grouped[unit]["users"]: grouped[unit]["users"][name] = {"items": [], "total": 0}
+            # o[2]: 單位, o[4]: 姓名, o[5]: 品項, o[6]: 數量, o[8]: 小計
+            unit, name, item, qty, subtotal = o[2], o[4], o[5], int(o[6]), int(o[8])
             
-            grouped[unit]["users"][name]["items"].append(item)
-            grouped[unit]["users"][name]["total"] += price
-            grouped[unit]["total"] += price
-            grand_total += price
+            if unit not in grouped: 
+                grouped[unit] = {"users": {}, "total": 0}
+            if name not in grouped[unit]["users"]: 
+                grouped[unit]["users"][name] = {"items": [], "total": 0}
+            
+            # 整合顯示格式：品項名稱 x 數量
+            grouped[unit]["users"][name]["items"].append(f"{item} x{qty}")
+            grouped[unit]["users"][name]["total"] += subtotal
+            grouped[unit]["total"] += subtotal
+            grand_total += subtotal
 
+        # 組合訊息字串
         for unit, u_data in grouped.items():
             all_msg += f"🏢 [{unit}] (小計 ${u_data['total']})\n"
             for name, p_data in u_data["users"].items():
@@ -334,12 +385,13 @@ def _handle_reports_menu(reply_token: str, user_id: str, access_token: str):
 # =========================
 # 彈出綁定快捷按鈕
 # =========================
-def _prompt_binding(reply_token: str, access_token: str, pending_item: int = 0, pending_meal: str = ""):
+def _prompt_binding(reply_token: str, access_token: str, pending_item: int = 0, pending_meal: str = "", pending_qty: int = 1):
     sheet_id = os.getenv("SHEET_ID", "")
     service = _get_sheets_service()
     
     rows = _read_values(service, sheet_id, "LINE_SETTING!A1:B20")
     quick_reply_items = []
+    
     for r in rows:
         if len(r) > 0:
             key = str(r[0]).strip()
@@ -348,15 +400,17 @@ def _prompt_binding(reply_token: str, access_token: str, pending_item: int = 0, 
             if "氣象署" in key:
                 display_name = val if val else key
                 
-                # 👇 新增：把 LUNCH/DINNER 也塞進按鈕指令裡！
+                # 指令格式變更為 "綁定並點餐 [單位] [餐別] [編號] [數量]"
                 if pending_item > 0:
                     meal_part = f" {pending_meal}" if pending_meal else ""
-                    action_text = f"綁定並點餐 {display_name}{meal_part} {pending_item}" 
+                    action_text = f"綁定並點餐 {display_name}{meal_part} {pending_item} {pending_qty}" 
                 else:
                     action_text = f"綁定單位 {display_name}"
                 
-                quick_reply_items.append({"type": "action", "action": {"type": "message", "label": display_name[:20], "text": action_text}})
-                
+                quick_reply_items.append({
+                    "type": "action", 
+                    "action": {"type": "message", "label": display_name[:20], "text": action_text}
+                })
     if not quick_reply_items:
         meal_part = f" {pending_meal}" if pending_meal else ""
         fallback_txt = f"綁定並點餐 未分類群組{meal_part} {pending_item}" if pending_item > 0 else "綁定單位 未分類群組"
@@ -377,21 +431,20 @@ def _prompt_binding(reply_token: str, access_token: str, pending_item: int = 0, 
 # =========================
 # 執行寫入訂單核心邏輯
 # =========================
-def _execute_order(reply_token, user_id, display_name, user_unit, item_num, access_token, service, sheet_id, is_new_bind=False, target_meal_type=None):
+def _execute_order(reply_token, user_id, display_name, user_unit, item_num, access_token, service, sheet_id, is_new_bind=False, target_meal_type=None, quantity=1):
     tw_tz = timezone(timedelta(hours=8))
     now_tw = datetime.now(tw_tz)
     today_str = now_tw.strftime("%Y-%m-%d")
 
+    # 1. 取得當前餐期資訊 (Active Payload)
     rows = _read_values(service, sheet_id, "logs!A:E")
     active_payload = None
     for r in reversed(rows):
         if len(r) >= 5 and r[3] == "PUBLISH_MENU":
             try:
                 payload = json.loads(r[4])
-                # 👇 新增：如果有指定餐別 (LUNCH/DINNER)，一定要對上才算數！
                 if target_meal_type and payload.get("meal") != target_meal_type:
                     continue
-                
                 if payload.get("date") == today_str:
                     deadline_str = payload.get("deadlineAt", "")
                     if deadline_str:
@@ -406,6 +459,7 @@ def _execute_order(reply_token, user_id, display_name, user_unit, item_num, acce
         _reply_text(reply_token, f"目前沒有開放【{meal_name}】的菜單，或已超過截止時間囉！⏳")
         return
     
+    # 2. 餐點檢索
     item_idx = item_num - 1
     items = active_payload.get("items", [])
     if item_idx < 0 or item_idx >= len(items):
@@ -418,32 +472,64 @@ def _execute_order(reply_token, user_id, display_name, user_unit, item_num, acce
     
     session_id = f"{active_payload.get('date')}_{active_payload.get('meal')}"
     item_name = target_item.get("name", "")
-    price = target_item.get("price", 0)
+    price = int(target_item.get("price", 0))
+
+    # 3. 檢查現有訂單是否需要合併
+    orders = _read_values(service, sheet_id, "orders_log!A:J")
+    existing_row_idx = -1
+    old_qty = 0
+
+    for i, o in enumerate(orders):
+        if len(o) >= 10 and o[1] == session_id and o[3] == user_id and o[5] == item_name and o[9] != "已取消":
+            existing_row_idx = i + 1
+            old_qty = int(o[6])
+            break
+
+    # 4. 寫入或更新試算表
+    if existing_row_idx > -1:
+        new_qty = old_qty + quantity
+        service.spreadsheets().values().update(
+            spreadsheetId=sheet_id,
+            range=f"orders_log!G{existing_row_idx}:I{existing_row_idx}",
+            valueInputOption="RAW",
+            body={"values": [[new_qty, price, new_qty * price]]}
+        ).execute()
+        op_title = "訂單已更新"
+    else:
+        new_qty = quantity
+        row_data = [
+            now_tw.strftime("%Y-%m-%d %H:%M:%S"), session_id, user_unit, user_id, 
+            display_name, item_name, quantity, price, quantity * price, "未付款"
+        ]
+        service.spreadsheets().values().append(
+            spreadsheetId=sheet_id, range="orders_log!A:J", valueInputOption="RAW",
+            insertDataOption="INSERT_ROWS", body={"values": [row_data]}
+        ).execute()
+        op_title = "點餐成功"
     
-    row_data = [
-        now_tw.strftime("%Y-%m-%d %H:%M:%S"), 
-        session_id,                           
-        user_unit,                            
-        user_id,                              
-        display_name,                         
-        item_name,                            
-        1,                                    
-        price,                                
-        price,                                
-        "未付款"                              
-    ]
-    
-    service.spreadsheets().values().append(
-        spreadsheetId=sheet_id,
-        range="orders_log!A:J",
-        valueInputOption="RAW",
-        insertDataOption="INSERT_ROWS",
-        body={"values": [row_data]}
-    ).execute()
-    
-    meal_txt = "午餐" if active_payload.get("meal") == "LUNCH" else "晚餐"
+    # 5. 格式化成功訊息
+    meal_label = "午餐" if active_payload.get("meal") == "LUNCH" else "晚餐"
     bind_msg = f"🎉 成功綁定單位：{user_unit}\n" if is_new_bind else ""
-    success_msg = f"{bind_msg}✅ {meal_txt}點餐成功！\n\n🏢 單位：{user_unit}\n🍱 餐點：{item_name}\n💰 價格：${price}\n\n感謝您的訂購！"
+    
+    # 計算本次點餐的小計 (若是累加，則顯示本次增加的金額)
+    this_time_subtotal = quantity * price
+    
+    success_msg = (
+        f"{bind_msg}✅ 【{meal_label}{op_title}】\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"🏢 群組：{user_unit}\n"
+        f"🍱 品項：{item_name}\n"
+        f"🔢 數量：{quantity} 份\n"
+        f"💰 本次小計：${this_time_subtotal} 元\n"
+        f"━━━━━━━━━━━━━━━\n"
+    )
+    
+    # 如果是更新，多顯示一列總計
+    if existing_row_idx > -1:
+        success_msg += f"📊 目前總計：{new_qty} 份 (${new_qty * price} 元)\n"
+        
+    success_msg += "💡 如需修改，請點選選單中的「修改訂單」。"
+    
     _reply_text(reply_token, success_msg)
 
 # =========================
@@ -454,11 +540,16 @@ def _handle_order(reply_token: str, user_id: str, text: str, access_token: str):
         parts = text.split(" ")
         target_meal = None
         item_num = 0
+        quantity = 1
 
-        # 支援兩種格式：1. "點餐 4" (舊版)  2. "點餐 LUNCH 4" (新版)
-        if len(parts) == 3 and parts[1] in ["LUNCH", "DINNER"] and parts[2].isdigit():
+        # 支援格式： 點餐 LUNCH 1 [數量]
+        if len(parts) >= 3 and parts[1] in ["LUNCH", "DINNER"] and parts[2].isdigit():
             target_meal = parts[1]
             item_num = int(parts[2])
+            if len(parts) >= 4 and parts[3].isdigit():
+                quantity = int(parts[3])
+        
+        # 支援舊格式： 點餐 1 (預設當前餐期)
         elif len(parts) == 2 and parts[1].isdigit():
             item_num = int(parts[1])
         else:
@@ -469,52 +560,64 @@ def _handle_order(reply_token: str, user_id: str, text: str, access_token: str):
         display_name, user_unit, _, _ = _get_user_info(service, sheet_id, user_id)
 
         if not user_unit:
-            # 這裡把抓到的 target_meal 傳給綁定流程
-            _prompt_binding(reply_token, access_token, pending_item=item_num, pending_meal=target_meal)
+            # 把傳入的 quantity 帶給 _prompt_binding
+            _prompt_binding(reply_token, access_token, 
+                            pending_item=item_num, 
+                            pending_meal=target_meal, 
+                            pending_qty=quantity)
             return
         
-        _execute_order(reply_token, user_id, display_name, user_unit, item_num, access_token, service, sheet_id, target_meal_type=target_meal)
+        # 呼叫執行函數時，多傳入 quantity
+        _execute_order(reply_token, user_id, display_name, user_unit, item_num, 
+                       access_token, service, sheet_id, 
+                       target_meal_type=target_meal, quantity=quantity)
     except Exception as e:
-        print(f"Error: {e}")
-        _reply_text(reply_token, "點餐發生錯誤，請稍後再試。")
+        print(f"Error in _handle_order: {e}")
+        _reply_text(reply_token, "點餐格式錯誤或系統忙碌中。")
 
 def _handle_bind_and_order(reply_token: str, user_id: str, text: str, access_token: str):
     try:
-        # 支援解析："綁定並點餐 群組名稱 LUNCH 4"
+        # 定義當前時間 (修正原本未定義 now_tw_str 的錯誤)
+        now_tw = datetime.now(timezone(timedelta(hours=8)))
+        now_tw_str = now_tw.strftime("%Y-%m-%d %H:%M:%S")
+
+        # 支援解析："綁定並點餐 單位名稱 LUNCH 1 10"
+        m_qty = re.match(r"^綁定並點餐\s+(.+)\s+(LUNCH|DINNER)\s+(\d+)\s+(\d+)$", text)
         m_meal = re.match(r"^綁定並點餐\s+(.+)\s+(LUNCH|DINNER)\s+(\d+)$", text)
-        m_legacy = re.match(r"^綁定並點餐\s+(.+)\s+(\d+)$", text)
         
         unit_name = ""
         target_meal = None
         item_num = 0
+        quantity = 1 # 預設
         
-        if m_meal:
-            unit_name = m_meal.group(1).strip()
-            target_meal = m_meal.group(2)
-            item_num = int(m_meal.group(3))
-        elif m_legacy:
-            unit_name = m_legacy.group(1).strip()
-            item_num = int(m_legacy.group(2))
+        if m_qty:
+            unit_name, target_meal, item_num, quantity = m_qty.groups()
+        elif m_meal:
+            unit_name, target_meal, item_num = m_meal.groups()
         else:
             return
 
+        item_num = int(item_num)
+        quantity = int(quantity)
+
         display_name = _get_line_profile(user_id, access_token)
-        now_tw_str = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
-
-        sheet_id = os.getenv("SHEET_ID", "")
         service = _get_sheets_service()
+        sheet_id = os.getenv("SHEET_ID", "")
 
-        row_data = [now_tw_str, user_id, display_name, unit_name, ""]
+        # 寫入 USERS 表格完成綁定
+        row_data = [now_tw_str, user_id, display_name, unit_name, "USER"]
         service.spreadsheets().values().append(
             spreadsheetId=sheet_id, range="USERS!A:E", valueInputOption="RAW",
             insertDataOption="INSERT_ROWS", body={"values": [row_data]}
         ).execute()
 
-        # 傳入 target_meal_type
-        _execute_order(reply_token, user_id, display_name, unit_name, item_num, access_token, service, sheet_id, is_new_bind=True, target_meal_type=target_meal)
+        # 呼叫執行點餐，將數量傳進去
+        _execute_order(reply_token, user_id, display_name, unit_name, item_num, 
+                       access_token, service, sheet_id, 
+                       is_new_bind=True, target_meal_type=target_meal, quantity=quantity)
     except Exception as e:
-        print(f"Bind Error: {e}")
-        _reply_text(reply_token, "作業失敗，請稍後再試。")
+        print(f"Bind and Order Error: {e}")
+        _reply_text(reply_token, "綁定並點餐時發生錯誤，請稍後再試。")
 
 def _handle_bind_unit(reply_token: str, user_id: str, text: str, access_token: str):
     unit_name = text.replace("綁定單位", "").strip()
@@ -586,8 +689,8 @@ def _handle_show_menu(reply_token: str, keyword: str):
     
     bubbles = []
     for i, item in enumerate(items, 1):
-        # 👇 修改：按鈕指令加入 target_meal (LUNCH/DINNER)
-        btn_action_text = f"點餐 {target_meal} {i}"
+        # 改為觸發數量選擇的指令
+        btn_action_text = f"選擇數量 {target_meal} {i}"
 
         bubble = {
             "type": "bubble", "size": "micro",
@@ -596,13 +699,15 @@ def _handle_show_menu(reply_token: str, keyword: str):
                 "contents": [
                     {"type": "text", "text": prefix, "weight": "bold", "color": title_color, "size": "lg", "align": "center", "margin": "md"},
                     {"type": "text", "text": f"[{i}] {item['name']}", "weight": "bold", "size": "md", "wrap": True},
-                    {"type": "text", "text": f"${item['price']}", "weight": "bold", "color": title_color, "size": "md", "margin": "md"},
-                    
+                    {"type": "text", "text": f"${item['price']}", "weight": "bold", "color": title_color, "size": "md", "margin": "md"}
                 ]
             },
             "footer": {
                 "type": "box", "layout": "vertical",
-                "contents": [{"type": "button", "style": btn_style, "color": btn_color, "height": "sm", "action": {"type": "message", "label": "👉 點這份", "text": btn_action_text}}]
+                "contents": [{
+                    "type": "button", "style": btn_style, "color": btn_color, "height": "sm", 
+                    "action": {"type": "message", "label": "👉 點這份", "text": btn_action_text}
+                }]
             }
         }
         bubbles.append(bubble)
@@ -613,6 +718,66 @@ def _handle_show_menu(reply_token: str, keyword: str):
         if len(messages) >= 5: break
 
     _send_line_payload({"replyToken": reply_token, "messages": messages}, os.getenv("LINE_CHANNEL_ACCESS_TOKEN", ""))
+
+def _handle_select_quantity(reply_token: str, text: str):
+    # 解析出 餐別 與 編號 (例如: 選擇數量 LUNCH 1)
+    parts = text.split(" ")
+    meal = parts[1]
+    item_num = parts[2]
+    
+    # 建立快速回覆按鈕
+    quick_reply_items = [
+        {"type": "action", "action": {"type": "message", "label": "1 份", "text": f"點餐 {meal} {item_num} 1"}},
+        {"type": "action", "action": {"type": "message", "label": "5 份", "text": f"點餐 {meal} {item_num} 5"}},
+        {"type": "action", "action": {"type": "message", "label": "10 份", "text": f"點餐 {meal} {item_num} 10"}},
+        {"type": "action", "action": {"type": "message", "label": "⌨️ 手動輸入數量", "text": f"手動輸入點餐 {meal} {item_num}"}}
+    ]
+
+    payload = {
+        "replyToken": reply_token,
+        "messages": [{
+            "type": "text",
+            "text": "請選擇或輸入所需數量：",
+            "quickReply": {"items": quick_reply_items}
+        }]
+    }
+    _send_line_payload(payload, os.getenv("LINE_CHANNEL_ACCESS_TOKEN"))
+
+def _set_user_state(service, sheet_id, user_id, state):
+    """將使用者狀態寫入 user_states 工作表"""
+    rows = _read_values(service, sheet_id, "user_states!A:B")
+    found_idx = -1
+    for i, r in enumerate(rows):
+        if len(r) > 0 and r[0] == user_id:
+            found_idx = i + 1
+            break
+    
+    now_str = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
+    if found_idx > -1:
+        service.spreadsheets().values().update(
+            spreadsheetId=sheet_id, range=f"user_states!B{found_idx}:C{found_idx}",
+            valueInputOption="RAW", body={"values": [[state, now_str]]}
+        ).execute()
+    else:
+        service.spreadsheets().values().append(
+            spreadsheetId=sheet_id, range="user_states!A:C",
+            valueInputOption="RAW", body={"values": [[user_id, state, now_str]]}
+        ).execute()
+
+def _handle_manual_input_trigger(reply_token, user_id, text, service, sheet_id):
+    # 使用 regex 精確抓取： "手動輸入點餐 DINNER 11"
+    match = re.search(r"手動輸入點餐\s+(LUNCH|DINNER)\s+(\d+)", text)
+    if not match:
+        return
+    
+    meal = match.group(1)
+    item_num = match.group(2)
+    
+    # 儲存狀態到 user_states 工作表
+    _set_user_state(service, sheet_id, user_id, f"SET_QTY|{meal}|{item_num}")
+    
+    # 回覆訊息
+    _reply_text(reply_token, f"🔢 請輸入欲訂購的數量：\n(例如直接輸入數字：7533967)")
 
 # =========================
 # 發送群組開團通知
@@ -697,7 +862,7 @@ def _handle_modify_order(reply_token: str, user_id: str, text: str, access_token
         _reply_text(reply_token, "🕒 目前沒有開放修改的訂單 (可能尚未開團或已截止)。")
         return
 
-    # 2. 撈取使用者的訂單 (且狀態不能是已取消)
+    # 2. 撈取使用者的訂單
     orders = _read_values(service, sheet_id, "orders_log!A:J")
     user_orders = []
     
@@ -714,7 +879,8 @@ def _handle_modify_order(reply_token: str, user_id: str, text: str, access_token
                     "timestamp": o[0],
                     "meal": active_sessions[sid],
                     "item": o[5],
-                    "price": o[7]
+                    "qty": o[6],
+                    "total": o[8]
                 })
 
     if not user_orders:
@@ -737,8 +903,8 @@ def _handle_modify_order(reply_token: str, user_id: str, text: str, access_token
                 "type": "box", "layout": "vertical",
                 "contents": [
                     {"type": "text", "text": order['meal'], "weight": "bold", "color": color, "size": "md"},
-                    {"type": "text", "text": order['item'], "weight": "bold", "size": "md", "wrap": True, "margin": "xs"},
-                    {"type": "text", "text": f"${order['price']}", "size": "md", "color": "#666666", "margin": "xs"}
+                    {"type": "text", "text": f"{order['item']} x{order['qty']}", "weight": "bold", "size": "md", "wrap": True, "margin": "xs"},
+                    {"type": "text", "text": f"共 ${order['total']}", "size": "md", "color": "#666666", "margin": "xs"}
                 ]
             },
             "footer": {
