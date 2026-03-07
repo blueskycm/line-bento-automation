@@ -125,6 +125,35 @@ def line_webhook(req: https_fn.Request) -> Response:
             except Exception as e:
                 print(f"Rich Menu Sync Error: {e}")
 
+        if event_type == "follow":
+            try:
+                service = _get_sheets_service()
+                # 1. 取得使用者 LINE 暱稱
+                display_name = _get_line_profile(user_id, channel_access_token)
+                
+                # 2. 檢查是否已在 USERS 名冊中
+                existing_name, _, _, _ = _get_user_info(service, sheet_id, user_id)
+                
+                if not existing_name:
+                    # 3. 準備寫入資料
+                    now_tw_str = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
+                    new_user_row = [now_tw_str, user_id, display_name, "", "USER"]
+                    
+                    service.spreadsheets().values().append(
+                        spreadsheetId=sheet_id, 
+                        range="USERS!A:E", 
+                        valueInputOption="RAW",
+                        insertDataOption="INSERT_ROWS", 
+                        body={"values": [new_user_row]}
+                    ).execute()
+                    
+                    # 4. 發送歡迎詞
+                    welcome_msg = f"歡迎加入，{display_name}！\n\n初次點餐時，小幫手會引導您綁定群組。"
+                    _reply_text(event.get("replyToken"), welcome_msg)
+                
+            except Exception as e:
+                print(f"Follow Registration Error: {e}")
+
         # --- 原有的 handle_message 邏輯 ---
         if event_type == "message" and event.get("message", {}).get("type") == "text":
             text = event["message"]["text"].strip()
@@ -185,7 +214,7 @@ def line_webhook(req: https_fn.Request) -> Response:
             elif text.startswith("綁定並點餐 "):
                 _handle_bind_and_order(reply_token, user_id, text, channel_access_token)
 
-            elif text.startswith("綁定單位 "):
+            elif text.startswith("綁定群組 "):
                 _handle_bind_unit(reply_token, user_id, text, channel_access_token)
 
             elif text.startswith("取消訂單 "):
@@ -223,7 +252,7 @@ def _handle_reports(reply_token: str, user_id: str, text: str, access_token: str
         _reply_text(reply_token, "⛔ 此為超級管理員專用指令。")
         return
     if text == "單位明細" and not user_unit:
-        _reply_text(reply_token, "⛔ 您尚未綁定單位，無法查看明細。")
+        _reply_text(reply_token, "⛔ 您尚未綁定群組，無法查看明細。")
         return
 
     tw_tz = timezone(timedelta(hours=8))
@@ -321,7 +350,7 @@ def _handle_reports(reply_token: str, user_id: str, text: str, access_token: str
 
         # 遍歷今日所有有效訂單
         for o in today_orders:
-            # o[2]: 單位, o[4]: 姓名, o[5]: 品項, o[6]: 數量, o[8]: 小計
+            # o[2]: 群組, o[4]: 姓名, o[5]: 品項, o[6]: 數量, o[8]: 小計
             unit, name, item, qty, subtotal = o[2], o[4], o[5], int(o[6]), int(o[8])
             
             if unit not in grouped: 
@@ -367,7 +396,7 @@ def _handle_reports_menu(reply_token: str, user_id: str, access_token: str):
         quick_reply_items.append({"type": "action", "action": {"type": "message", "label": "👑 全部明細", "text": "全部明細"}})
 
     if not quick_reply_items:
-        _reply_text(reply_token, "⚠️ 您目前沒有權限查看報表，請先完成單位綁定。")
+        _reply_text(reply_token, "⚠️ 您目前沒有權限查看報表，請先完成群組綁定。")
         return
 
     payload = {
@@ -400,12 +429,12 @@ def _prompt_binding(reply_token: str, access_token: str, pending_item: int = 0, 
             if "氣象署" in key:
                 display_name = val if val else key
                 
-                # 指令格式變更為 "綁定並點餐 [單位] [餐別] [編號] [數量]"
+                # 指令格式變更為 "綁定並點餐 [群組] [餐別] [編號] [數量]"
                 if pending_item > 0:
                     meal_part = f" {pending_meal}" if pending_meal else ""
                     action_text = f"綁定並點餐 {display_name}{meal_part} {pending_item} {pending_qty}" 
                 else:
-                    action_text = f"綁定單位 {display_name}"
+                    action_text = f"綁定群組 {display_name}"
                 
                 quick_reply_items.append({
                     "type": "action", 
@@ -413,7 +442,7 @@ def _prompt_binding(reply_token: str, access_token: str, pending_item: int = 0, 
                 })
     if not quick_reply_items:
         meal_part = f" {pending_meal}" if pending_meal else ""
-        fallback_txt = f"綁定並點餐 未分類群組{meal_part} {pending_item}" if pending_item > 0 else "綁定單位 未分類群組"
+        fallback_txt = f"綁定並點餐 未分類群組{meal_part} {pending_item}" if pending_item > 0 else "綁定群組 未分類群組"
         quick_reply_items = [{"type": "action", "action": {"type": "message", "label": "未分類群組", "text": fallback_txt}}]
 
     payload = {
@@ -509,7 +538,7 @@ def _execute_order(reply_token, user_id, display_name, user_unit, item_num, acce
     
     # 5. 格式化成功訊息
     meal_label = "午餐" if active_payload.get("meal") == "LUNCH" else "晚餐"
-    bind_msg = f"🎉 成功綁定單位：{user_unit}\n" if is_new_bind else ""
+    bind_msg = f"🎉 成功綁定群組：{user_unit}\n" if is_new_bind else ""
     
     # 計算本次點餐的小計 (若是累加，則顯示本次增加的金額)
     this_time_subtotal = quantity * price
@@ -581,7 +610,7 @@ def _handle_bind_and_order(reply_token: str, user_id: str, text: str, access_tok
         now_tw = datetime.now(timezone(timedelta(hours=8)))
         now_tw_str = now_tw.strftime("%Y-%m-%d %H:%M:%S")
 
-        # 支援解析："綁定並點餐 單位名稱 LUNCH 1 10"
+        # 支援解析："綁定並點餐 群組名稱 LUNCH 1 10"
         m_qty = re.match(r"^綁定並點餐\s+(.+)\s+(LUNCH|DINNER)\s+(\d+)\s+(\d+)$", text)
         m_meal = re.match(r"^綁定並點餐\s+(.+)\s+(LUNCH|DINNER)\s+(\d+)$", text)
         
@@ -620,7 +649,7 @@ def _handle_bind_and_order(reply_token: str, user_id: str, text: str, access_tok
         _reply_text(reply_token, "綁定並點餐時發生錯誤，請稍後再試。")
 
 def _handle_bind_unit(reply_token: str, user_id: str, text: str, access_token: str):
-    unit_name = text.replace("綁定單位", "").strip()
+    unit_name = text.replace("綁定群組", "").strip()
     if not unit_name: return
     display_name = _get_line_profile(user_id, access_token)
     now_tw_str = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
