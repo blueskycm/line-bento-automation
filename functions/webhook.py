@@ -75,7 +75,7 @@ def _get_line_profile(user_id: str, access_token: str) -> str:
         return "未知使用者"
 
 def _get_user_info(service, sheet_id: str, user_id: str):
-    user_rows = _read_values(service, sheet_id, "USERS!A:F") # 讀取到 F 欄
+    user_rows = _read_values(service, sheet_id, "USERS!A:F")
     for r in reversed(user_rows):
         if len(r) >= 4 and r[1] == user_id:
             role = str(r[4]).strip() if len(r) >= 5 else ""
@@ -128,36 +128,45 @@ def line_webhook(req: https_fn.Request) -> Response:
         if event_type == "follow":
             try:
                 service = _get_sheets_service()
-                # 1. 取得使用者 LINE 暱稱
-                display_name = _get_line_profile(user_id, channel_access_token)
-                
-                # 2. 檢查是否已在 USERS 名冊中
                 existing_name, _, _, _ = _get_user_info(service, sheet_id, user_id)
-                
+
                 if not existing_name:
-                    # 3. 準備寫入資料
+                    line_name = _get_line_profile(user_id, channel_access_token)
                     now_tw_str = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
-                    new_user_row = [now_tw_str, user_id, display_name, "", "USER"]
-                    
+                    new_user_row = [now_tw_str, user_id, line_name, "", "USER"]
+
                     service.spreadsheets().values().append(
-                        spreadsheetId=sheet_id, 
-                        range="USERS!A:E", 
+                        spreadsheetId=sheet_id,
+                        range="USERS!A:E",
                         valueInputOption="RAW",
-                        insertDataOption="INSERT_ROWS", 
+                        insertDataOption="INSERT_ROWS",
                         body={"values": [new_user_row]}
                     ).execute()
-                    
-                    # 4. 發送歡迎詞
-                    welcome_msg = f"歡迎加入，{display_name}！\n\n初次點餐時，小幫手會引導您綁定群組。"
+
+                    welcome_msg = f"歡迎加入，{line_name}！\n\n初次點餐時，小幫手會引導您綁定群組。"
                     _reply_text(event.get("replyToken"), welcome_msg)
-                
+                else:
+                    _reply_text(event.get("replyToken"), "歡迎回來！請直接點選菜單進行點餐。")
             except Exception as e:
                 print(f"Follow Registration Error: {e}")
 
-        # --- 原有的 handle_message 邏輯 ---
+        # --- handle_message 邏輯 ---
         if event_type == "message" and event.get("message", {}).get("type") == "text":
             text = event["message"]["text"].strip()
             reply_token = event.get("replyToken")
+
+            # --- 權限預檢邏輯 ---
+            report_commands = ["數據報表", "老闆結單", "單位明細", "全部明細"]
+            if text in report_commands:
+                service = _get_sheets_service()
+                _, _, user_role, _ = _get_user_info(service, sheet_id, user_id)
+                user_role = str(user_role).strip().upper()
+                
+                ADMIN_ROLES = ["老闆", "超級管理員", "ADMIN"]
+                # 如果是 USER 或空值，直接結束請求，達成「毫無回應」
+                if user_role not in ADMIN_ROLES and user_role != "ADMIN": 
+                    # 註：這裡排除非管理者，若 user_role 為 "USER" 或 "" 會命中
+                    return Response("OK", status=200)
 
             # ==========================================
             # 優先處理「純數字」：這必須是第一個判斷！
@@ -302,42 +311,35 @@ def _handle_reports(reply_token: str, user_id: str, text: str, access_token: str
         text = "老闆結單" # 自動連鎖顯示老闆結單 
 
     # ==========================
-    # 📝 報表 B：老闆結單 (第二則訊息)
+    # 📝 報表 B：老闆結單 (按群組分層統計)
     # ==========================
     if text == "老闆結單":
-        lunch_counts, dinner_counts = {}, {}
-        unit_totals = {}
-        grand_total = 0
+        # 結構：{ "群組名": { "品項": 數量, "total_money": 金額 } }
+        group_stats = {}
+        grand_total_money = 0
 
         for o in today_orders:
-            if text == "老闆結單" and "🏢" not in (messages_to_send[0]["text"] if messages_to_send else ""):
-                pass
-            elif o[2] != user_unit: 
-                continue 
+            # o[2]:群組, o[5]:品項, o[6]:數量, o[8]:小計
+            unit, item, qty, subtotal = o[2], o[5], int(o[6]), int(o[8])
             
-            # o[1]: session, o[5]: 品項, o[6]: 數量, o[8]: 小計
-            sid_inner, item, qty, subtotal = o[1], o[5], int(o[6]), int(o[8])
-            unit_totals[o[2]] = unit_totals.get(o[2], 0) + subtotal
-            grand_total += subtotal
+            if unit not in group_stats:
+                group_stats[unit] = {"items": {}, "total_money": 0}
+            
+            group_stats[unit]["items"][item] = group_stats[unit]["items"].get(item, 0) + qty
+            group_stats[unit]["total_money"] += subtotal
+            grand_total_money += subtotal
 
-            if "LUNCH" in sid_inner:
-                lunch_counts[item] = lunch_counts.get(item, 0) + qty # 修改：累加數量
-            elif "DINNER" in sid_inner:
-                dinner_counts[item] = dinner_counts.get(item, 0) + qty # 修改：累加數量
+        boss_msg = f"🍱 【{today_str} 群組結單】\n"
+        boss_msg += "=" * 15 + "\n"
 
-        phone_display = f"(電話：{user_phone})" if user_phone else ""
-        boss_msg = f"🍱 【{today_str} 統計】{phone_display}\n"
-        boss_msg += "-" * 15 + "\n"
+        for unit, data in group_stats.items():
+            boss_msg += f"🏢【{unit}】\n"
+            for item, count in data["items"].items():
+                boss_msg += f"  ▪️ {item}：{count} 份\n"
+            boss_msg += f"  💰 小計：${data['total_money']}\n"
+            boss_msg += "-" * 15 + "\n"
 
-        for item, count in lunch_counts.items(): boss_msg += f"🔸 {item}：{count} 份\n"
-        if lunch_counts and dinner_counts: boss_msg += "-" * 15 + "\n"
-        for item, count in dinner_counts.items(): boss_msg += f"🔸 {item}：{count} 份\n"
-
-        boss_msg += "-" * 15 + "\n"
-        boss_msg += f"💰 應收合計：${grand_total}\n"
-        for unit, total in unit_totals.items():
-            boss_msg += f"  🏢 {unit}：${total}\n"
-        
+        boss_msg += f"🔥 應收總計：${grand_total_money}"
         messages_to_send.append({"type": "text", "text": boss_msg.strip()})
 
     # ==========================
@@ -382,15 +384,17 @@ def _handle_reports_menu(reply_token: str, user_id: str, access_token: str):
     service = _get_sheets_service()
     sheet_id = os.getenv("SHEET_ID", "")
     _, user_unit, user_role, _ = _get_user_info(service, sheet_id, user_id)
-    
-    role = str(user_role).strip().upper() # 轉大寫去空格
+    user_role = str(user_role).strip().upper() # 統一轉大寫比對
     ADMIN_ROLES = ["老闆", "超級管理員", "ADMIN"]
+    
+    if user_role not in ADMIN_ROLES:
+        return
     
     quick_reply_items = []
     if user_unit:
         quick_reply_items.append({"type": "action", "action": {"type": "message", "label": "🏢 單位明細", "text": "單位明細"}})
     
-    if any(r in role for r in ADMIN_ROLES) or role in ADMIN_ROLES:
+    if user_role in ADMIN_ROLES:
         quick_reply_items.append({"type": "action", "action": {"type": "message", "label": "🍱 老闆結單", "text": "老闆結單"}})
         # 雖然圖文選單有網址，但快速回覆裡保留文字指令作為備援
         quick_reply_items.append({"type": "action", "action": {"type": "message", "label": "👑 全部明細", "text": "全部明細"}})
@@ -650,17 +654,34 @@ def _handle_bind_and_order(reply_token: str, user_id: str, text: str, access_tok
 
 def _handle_bind_unit(reply_token: str, user_id: str, text: str, access_token: str):
     unit_name = text.replace("綁定群組", "").strip()
-    if not unit_name: return
-    display_name = _get_line_profile(user_id, access_token)
-    now_tw_str = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
-
-    sheet_id = os.getenv("SHEET_ID", "")
     service = _get_sheets_service()
-    row_data = [now_tw_str, user_id, display_name, unit_name, ""]
-    service.spreadsheets().values().append(
-        spreadsheetId=sheet_id, range="USERS!A:E", valueInputOption="RAW",
-        insertDataOption="INSERT_ROWS", body={"values": [row_data]}
-    ).execute()
+    sheet_id = os.getenv("SHEET_ID", "")
+    
+    # 1. 找出使用者在第幾列
+    user_rows = _read_values(service, sheet_id, "USERS!A:B")
+    target_row = -1
+    for i, r in enumerate(user_rows):
+        if len(r) >= 2 and r[1] == user_id:
+            target_row = i + 1 # 試算表索引從 1 開始
+            break
+
+    if target_row > -1:
+        # 2. 如果找到了，就「更新」該列的 D 欄 (所屬群組)
+        service.spreadsheets().values().update(
+            spreadsheetId=sheet_id,
+            range=f"USERS!D{target_row}",
+            valueInputOption="RAW",
+            body={"values": [[unit_name]]}
+        ).execute()
+    else:
+        # 3. 如果沒找到 (例如直接輸入指令)，才用 append
+        now_tw_str = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
+        display_name = _get_line_profile(user_id, access_token)
+        new_row = [now_tw_str, user_id, display_name, unit_name, "USER"]
+        service.spreadsheets().values().append(
+            spreadsheetId=sheet_id, range="USERS!A:E", 
+            valueInputOption="RAW", body={"values": [new_row]}
+        ).execute()
     _reply_text(reply_token, f"✅ 成功綁定為：{unit_name}\n👉 請再次點擊圖卡上的按鈕來點餐吧！")
 
 
