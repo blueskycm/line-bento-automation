@@ -244,13 +244,13 @@ def line_webhook(req: https_fn.Request) -> Response:
     return Response("OK", status=200)
 
 # =========================
-# 報表指令 (排除已取消訂單)
+# 報表指令 (排除已取消訂單，依午晚餐分隔)
 # =========================
 def _handle_reports(reply_token: str, user_id: str, text: str, access_token: str):
     sheet_id = os.getenv("SHEET_ID", "")
     service = _get_sheets_service()
 
-    # 1. 取得資訊 (修正：接收 4 個變數)
+    # 1. 取得資訊
     display_name, user_unit, user_role, user_phone = _get_user_info(service, sheet_id, user_id)
 
     # 2. 權限檢查
@@ -275,106 +275,211 @@ def _handle_reports(reply_token: str, user_id: str, text: str, access_token: str
         _reply_text(reply_token, "📝 今日尚無訂單資料。")
         return
 
+    # 建立電話字典 (讀取 USERS 表)
+    user_rows = _read_values(service, sheet_id, "USERS!A:F")
+    phone_dict = {}
+    for r in user_rows:
+        if len(r) >= 6 and r[1]:
+            phone_dict[r[1]] = str(r[5]).strip()
+
+    # ⭐ 建立群組反向對應字典 (顯示名稱 -> 原始代號，例如 "資海-午噹噹" -> "氣象署2")
+    setting_rows = _read_values(service, sheet_id, "LINE_SETTING!A1:B20")
+    reverse_group_map = {}
+    for r in setting_rows:
+        if len(r) > 1:
+            key = str(r[0]).strip()
+            val = str(r[1]).strip()
+            if val:
+                reverse_group_map[val] = key
+
     messages_to_send = []
+    
+    # 定義要處理的餐期與圖示
+    meals = [("LUNCH", "☀️ 午餐"), ("DINNER", "🌙 晚餐")]
 
     # ==========================
-    # 📝 報表 A：單位明細 (第一則訊息)
+    # 📝 報表 A：單位明細 (一次回傳群組明細 & 群組統計)
     # ==========================
     if text == "單位明細":
-        unit_msg = ""
-        for m_type in ["LUNCH", "DINNER"]:
-            m_name = "午餐" if m_type == "LUNCH" else "晚餐"
+        unit_msg_parts = []   # 第一則：群組明細
+        stats_msg_parts = []  # 第二則：群組統計
+        grand_total_unit = 0  # 該單位的總應收金額
+
+        # 取得還原後的單位名稱
+        display_user_unit = reverse_group_map.get(user_unit, user_unit)
+
+        for m_type, m_icon in meals:
             sid_prefix = f"{today_str}_{m_type}"
-            
             unit_orders = [o for o in today_orders if o[1] == sid_prefix and o[2] == user_unit]
             if not unit_orders: continue
 
-            # 修改：加總 o[8] (小計)
+            # 該餐期該單位的小計
             section_total = sum(int(o[8]) for o in unit_orders)
+            grand_total_unit += section_total
+            
+            # ---------------------------
+            # 處理第一則：群組明細 (依人名分)
+            # ---------------------------
             user_totals = {}
             for o in unit_orders:
-                # o[4]: 姓名, o[5]: 品項, o[6]: 數量, o[8]: 小計
                 name, item, qty, subtotal = o[4], o[5], int(o[6]), int(o[8])
                 if name not in user_totals:
                     user_totals[name] = {"items": [], "total": 0}
                 user_totals[name]["items"].append(f"{item} x{qty}")
                 user_totals[name]["total"] += subtotal
 
-            unit_msg += f"🏢 【{today_str} {m_name}】\n"
-            unit_msg += f"本餐總金額：${section_total}\n" + "-" * 15 + "\n"
+            m1_msg = f"{m_icon} (金額：${section_total})\n"
             for name, data in user_totals.items():
-                unit_msg += f"👤 {name}：{', '.join(data['items'])} (${data['total']})\n"
-            unit_msg += "\n"
+                m1_msg += f"👤 {name}：{', '.join(data['items'])} (${data['total']})\n"
+            unit_msg_parts.append(m1_msg.strip())
 
-        if unit_msg:
-            messages_to_send.append({"type": "text", "text": unit_msg.strip()})
-        text = "老闆結單" # 自動連鎖顯示老闆結單 
+            # ---------------------------
+            # 處理第二則：群組統計 (依品項分)
+            # ---------------------------
+            item_stats = {}
+            for o in unit_orders:
+                item, qty = o[5], int(o[6])
+                item_stats[item] = item_stats.get(item, 0) + qty
+
+            m2_msg = f"{m_icon}\n"
+            for item, count in item_stats.items():
+                m2_msg += f"  ▪️ {item}：{count} 份\n"
+            m2_msg += f"  💰 小計：${section_total}"
+            stats_msg_parts.append(m2_msg.strip())
+
+        # 組裝並發送訊息
+        if unit_msg_parts:
+            # 第一則：群組明細
+            final_unit_msg = f"🏢 【{today_str} 群組個人明細】\n{display_user_unit}\n" + "=" * 15 + "\n"
+            final_unit_msg += "\n------------------------------\n".join(unit_msg_parts)
+            final_unit_msg += f"\n===============\n🔥 應收總計：${grand_total_unit}"
+            messages_to_send.append({"type": "text", "text": final_unit_msg})
+            
+            # 第二則：群組統計
+            phone_str = user_phone if user_phone else "未提供"
+            final_stats_msg = f"🍱 【{today_str} 群組統計】\n{display_user_unit} (電話：{phone_str})\n" + "=" * 15 + "\n"
+            final_stats_msg += "\n------------------------------\n".join(stats_msg_parts)
+            final_stats_msg += f"\n===============\n🔥 應收總計：${grand_total_unit}"
+            messages_to_send.append({"type": "text", "text": final_stats_msg})
+        else:
+            messages_to_send.append({"type": "text", "text": f"🏢 【{today_str} {display_user_unit}】\n今日尚無您的單位訂單資料。"})
 
     # ==========================
-    # 📝 報表 B：老闆結單 (按群組分層統計)
+    # 📝 報表 B：老闆結單 (先分群組，再分午晚餐)
     # ==========================
-    if text == "老闆結單":
-        # 結構：{ "群組名": { "品項": 數量, "total_money": 金額 } }
-        group_stats = {}
+    elif text == "老闆結單":
+        boss_msg_parts = []
         grand_total_money = 0
-
+        
+        # 取得今天有訂餐的所有不重複群組
+        unique_units = []
         for o in today_orders:
-            # o[2]:群組, o[5]:品項, o[6]:數量, o[8]:小計
-            unit, item, qty, subtotal = o[2], o[5], int(o[6]), int(o[8])
-            
-            if unit not in group_stats:
-                group_stats[unit] = {"items": {}, "total_money": 0}
-            
-            group_stats[unit]["items"][item] = group_stats[unit]["items"].get(item, 0) + qty
-            group_stats[unit]["total_money"] += subtotal
-            grand_total_money += subtotal
+            if o[2] not in unique_units:
+                unique_units.append(o[2])
 
-        boss_msg = f"🍱 【{today_str} 群組結單】\n"
-        boss_msg += "=" * 15 + "\n"
+        for unit in unique_units:
+            # 取得還原後的單位名稱
+            display_unit = reverse_group_map.get(unit, unit)
 
-        for unit, data in group_stats.items():
-            boss_msg += f"🏢【{unit}】\n"
-            for item, count in data["items"].items():
-                boss_msg += f"  ▪️ {item}：{count} 份\n"
-            boss_msg += f"  💰 小計：${data['total_money']}\n"
-            boss_msg += "-" * 15 + "\n"
+            unit_msg = f"🏢【{display_unit}】\n"
+            unit_total = 0
+            meal_parts = []
 
-        boss_msg += f"🔥 應收總計：${grand_total_money}"
-        messages_to_send.append({"type": "text", "text": boss_msg.strip()})
+            for m_type, m_icon in meals:
+                sid_prefix = f"{today_str}_{m_type}"
+                meal_orders = [o for o in today_orders if o[1] == sid_prefix and o[2] == unit]
+                if not meal_orders: continue
+
+                # 計算該餐期小計
+                meal_subtotal = sum(int(o[8]) for o in meal_orders)
+                unit_total += meal_subtotal
+                grand_total_money += meal_subtotal
+
+                # 統計品項數量
+                item_stats = {}
+                for o in meal_orders:
+                    item, qty = o[5], int(o[6])
+                    item_stats[item] = item_stats.get(item, 0) + qty
+
+                # 組裝該餐期文字
+                m_msg = f"{m_icon}\n"
+                for item, count in item_stats.items():
+                    m_msg += f"  ▪️ {item}：{count} 份\n"
+                m_msg += f"  💰 小計：${meal_subtotal}"
+                meal_parts.append(m_msg)
+
+            if meal_parts:
+                unit_msg += "\n".join(meal_parts)
+                unit_msg += f"\n🔸 群組總計：${unit_total}"
+                boss_msg_parts.append(unit_msg)
+
+        boss_msg = f"🍱 【{today_str} 群組結單】\n" + "=" * 15 + "\n"
+        if boss_msg_parts:
+            boss_msg += "\n------------------------------\n".join(boss_msg_parts)
+            boss_msg += f"\n===============\n🔥 應收總計：${grand_total_money}"
+        else:
+            boss_msg += "今日尚無訂單資料。"
+
+        messages_to_send.append({"type": "text", "text": boss_msg})
 
     # ==========================
-    # 📝 報表 C：全部明細 (管理員專用)
+    # 📝 報表 C：全部明細 (先分群組，再分午晚餐)
     # ==========================
     elif text == "全部明細":
-        all_msg = f"👑 【{today_str} 全署明細】\n" + "=" * 15 + "\n"
+        all_msg_parts = []
         grand_total = 0
-        grouped = {}
-
-        # 遍歷今日所有有效訂單
-        for o in today_orders:
-            # o[2]: 群組, o[4]: 姓名, o[5]: 品項, o[6]: 數量, o[8]: 小計
-            unit, name, item, qty, subtotal = o[2], o[4], o[5], int(o[6]), int(o[8])
-            
-            if unit not in grouped: 
-                grouped[unit] = {"users": {}, "total": 0}
-            if name not in grouped[unit]["users"]: 
-                grouped[unit]["users"][name] = {"items": [], "total": 0}
-            
-            # 整合顯示格式：品項名稱 x 數量
-            grouped[unit]["users"][name]["items"].append(f"{item} x{qty}")
-            grouped[unit]["users"][name]["total"] += subtotal
-            grouped[unit]["total"] += subtotal
-            grand_total += subtotal
-
-        # 組合訊息字串
-        for unit, u_data in grouped.items():
-            all_msg += f"🏢 [{unit}] (小計 ${u_data['total']})\n"
-            for name, p_data in u_data["users"].items():
-                all_msg += f"  👤 {name}：{', '.join(p_data['items'])} (${p_data['total']})\n"
-            all_msg += "-" * 15 + "\n"
         
-        all_msg += f"💰 總計金額：${grand_total}"
-        messages_to_send.append({"type": "text", "text": all_msg.strip()})
+        # 取得今天有訂餐的所有不重複群組
+        unique_units = []
+        for o in today_orders:
+            if o[2] not in unique_units:
+                unique_units.append(o[2])
+
+        for unit in unique_units:
+            # 取得還原後的單位名稱
+            display_unit = reverse_group_map.get(unit, unit)
+
+            # 先算該單位的總計，顯示在標題旁
+            unit_orders_all = [o for o in today_orders if o[2] == unit]
+            unit_total = sum(int(o[8]) for o in unit_orders_all)
+            grand_total += unit_total
+
+            unit_msg = f"🏢 [{display_unit}] (單位小計 ${unit_total})\n"
+            meal_parts = []
+
+            for m_type, m_icon in meals:
+                sid_prefix = f"{today_str}_{m_type}"
+                meal_orders = [o for o in today_orders if o[1] == sid_prefix and o[2] == unit]
+                if not meal_orders: continue
+
+                meal_subtotal = sum(int(o[8]) for o in meal_orders)
+                
+                # 依訂購人整理明細 (使用 uid 防同名同姓)
+                user_totals = {}
+                for o in meal_orders:
+                    uid, name, item, qty, subtotal = o[3], o[4], o[5], int(o[6]), int(o[8])
+                    if uid not in user_totals:
+                        user_totals[uid] = {"name": name, "items": [], "total": 0}
+                    user_totals[uid]["items"].append(f"{item} x{qty}")
+                    user_totals[uid]["total"] += subtotal
+
+                m_msg = f"{m_icon} (金額：${meal_subtotal})\n"
+                for uid, data in user_totals.items():
+                    m_msg += f"  👤 {data['name']}：{', '.join(data['items'])} (${data['total']})\n"
+                meal_parts.append(m_msg.strip())
+
+            if meal_parts:
+                unit_msg += "\n".join(meal_parts)
+                all_msg_parts.append(unit_msg)
+
+        all_msg = f"👑 【{today_str} 全署明細】\n" + "=" * 15 + "\n"
+        if all_msg_parts:
+            all_msg += "\n------------------------------\n".join(all_msg_parts)
+            all_msg += f"\n===============\n💰 總計金額：${grand_total}"
+        else:
+            all_msg += "今日尚無訂單資料。"
+            
+        messages_to_send.append({"type": "text", "text": all_msg})
 
     # 4. 最終發送
     if messages_to_send:
