@@ -612,16 +612,31 @@ def _execute_order(reply_token, user_id, display_name, user_unit, item_num, acce
     item_name = target_item.get("name", "")
     price = int(target_item.get("price", 0))
 
-    # 3. 檢查現有訂單是否需要合併
+    # 3. 檢查現有訂單是否需要合併，並計算該品項的總銷量
     orders = _read_values(service, sheet_id, "orders_log!A:J")
     existing_row_idx = -1
     old_qty = 0
+    current_item_total = 0
 
     for i, o in enumerate(orders):
-        if len(o) >= 10 and o[1] == session_id and o[3] == user_id and o[5] == item_name and o[9] != "已取消":
-            existing_row_idx = i + 1
-            old_qty = int(o[6])
-            break
+        if len(o) >= 10 and o[1] == session_id and o[5] == item_name and o[9] != "已取消":
+            current_item_total += int(o[6])
+            if o[3] == user_id:
+                existing_row_idx = i + 1
+                old_qty = int(o[6])
+                # 注意：這裡拿掉了原本的 break，讓迴圈跑完才能算出所有人的總銷量
+
+    # 新增：限量版數量檢查
+    item_limit = target_item.get("limit")
+    if item_limit is not None:
+        remaining = int(item_limit) - current_item_total
+        # quantity 是本次欲「新增/累加」的數量
+        if quantity > remaining:
+            if remaining > 0:
+                _reply_text(reply_token, f"⚠️ 抱歉！【{item_name}】是限量版，目前只剩下 {remaining} 份可供加點囉！")
+            else:
+                _reply_text(reply_token, f"😭 抱歉！太晚一步了，【{item_name}】已經被搶購一空囉！")
+            return
 
     # 4. 寫入或更新試算表
     if existing_row_idx > -1:
@@ -847,13 +862,18 @@ def _handle_show_menu(reply_token: str, keyword: str):
         # 改為觸發數量選擇的指令
         btn_action_text = f"選擇數量 {target_meal} {i}"
 
+        # 如果有限量，就在圖卡的品名後面加上標示
+        limit_text = ""
+        if "limit" in item:
+            limit_text = f"\n(限量 {item['limit']} 份)"
+
         bubble = {
             "type": "bubble", "size": "micro",
             "body": {
                 "type": "box", "layout": "vertical",
                 "contents": [
                     {"type": "text", "text": prefix, "weight": "bold", "color": title_color, "size": "lg", "align": "center", "margin": "md"},
-                    {"type": "text", "text": f"[{i}] {item['name']}", "weight": "bold", "size": "md", "wrap": True},
+                    {"type": "text", "text": f"[{i}] {item['name']}{limit_text}", "weight": "bold", "size": "md", "wrap": True},
                     {"type": "text", "text": f"${item['price']}", "weight": "bold", "color": title_color, "size": "md", "margin": "md"}
                 ]
             },
@@ -874,25 +894,96 @@ def _handle_show_menu(reply_token: str, keyword: str):
 
     _send_line_payload({"replyToken": reply_token, "messages": messages}, os.getenv("LINE_CHANNEL_ACCESS_TOKEN", ""))
 
+# =========================
+# 觸發選擇數量 (檢查庫存與顯示按鈕)
+# =========================
 def _handle_select_quantity(reply_token: str, text: str):
     # 解析出 餐別 與 編號 (例如: 選擇數量 LUNCH 1)
     parts = text.split(" ")
+    if len(parts) < 3: return
     meal = parts[1]
-    item_num = parts[2]
+    item_num_str = parts[2]
+    item_num = int(item_num_str)
     
-    # 建立快速回覆按鈕
-    quick_reply_items = [
-        {"type": "action", "action": {"type": "message", "label": "1 份", "text": f"點餐 {meal} {item_num} 1"}},
-        {"type": "action", "action": {"type": "message", "label": "5 份", "text": f"點餐 {meal} {item_num} 5"}},
-        {"type": "action", "action": {"type": "message", "label": "10 份", "text": f"點餐 {meal} {item_num} 10"}},
-        {"type": "action", "action": {"type": "message", "label": "⌨️ 手動輸入數量", "text": f"手動輸入點餐 {meal} {item_num}"}}
-    ]
+    service = _get_sheets_service()
+    sheet_id = os.getenv("SHEET_ID", "")
+    
+    # 1. 抓取當前菜單，取得餐點名稱與限量資訊
+    tw_tz = timezone(timedelta(hours=8))
+    today_str = datetime.now(tw_tz).strftime("%Y-%m-%d")
+    
+    rows = _read_values(service, sheet_id, "logs!A:E")
+    active_payload = None
+    for r in reversed(rows):
+        if len(r) >= 5 and r[3] == "PUBLISH_MENU":
+            try:
+                payload = json.loads(r[4])
+                if payload.get("date") == today_str and payload.get("meal") == meal:
+                    active_payload = payload
+                    break
+            except: continue
+    
+    item_name = "餐點"
+    limit_text = ""
+    remaining = None
+    
+    # 若有找到發布的菜單，開始檢查庫存
+    if active_payload:
+        items = active_payload.get("items", [])
+        item_idx = item_num - 1
+        if 0 <= item_idx < len(items):
+            target_item = items[item_idx]
+            item_name = target_item.get("name", "餐點")
+            item_limit = target_item.get("limit")
+            
+            if item_limit is not None:
+                # 計算目前已賣出數量
+                session_id = f"{active_payload.get('date')}_{active_payload.get('meal')}"
+                orders = _read_values(service, sheet_id, "orders_log!A:J")
+                current_total = sum(
+                    int(o[6]) for o in orders 
+                    if len(o) >= 10 and o[1] == session_id and o[5] == item_name and o[9] != "已取消"
+                )
+                remaining = int(item_limit) - current_total
+                
+                # 沒庫存了：直接回覆搶購一空，並中斷流程 (不出按鈕)
+                if remaining <= 0:
+                    _reply_text(reply_token, f"😭 抱歉！太晚一步了，【{item_name}】已經被搶購一空囉！")
+                    return
+                
+                # 還有庫存：修改提示文字
+                limit_text = f"(目前剩下 {remaining} 份)"
+    
+    # 2. 建立快速回覆按鈕
+    quick_reply_items = []
+    
+    # 動態顯示數量按鈕 (若剩餘數量少於選項，則隱藏該按鈕)
+    qty_options = [1, 5, 10]
+    for q in qty_options:
+        if remaining is not None and q > remaining:
+            if q == 1:
+                pass # 就算資料異常防呆，1份的按鈕還是給，讓寫入訂單的那一關去擋
+            else:
+                continue # 隱藏超過剩餘數量的按鈕 (例如只剩3份，就不顯示 5份、10份)
+                
+        quick_reply_items.append({
+            "type": "action", 
+            "action": {"type": "message", "label": f"{q} 份", "text": f"點餐 {meal} {item_num_str} {q}"}
+        })
+        
+    quick_reply_items.append({
+        "type": "action", 
+        "action": {"type": "message", "label": "⌨️ 手動輸入", "text": f"手動輸入點餐 {meal} {item_num_str}"}
+    })
+
+    # 將品名加進提示文字中，使用者體驗會更好
+    prompt_text = f"請選擇或輸入所需數量：{limit_text}"
 
     payload = {
         "replyToken": reply_token,
         "messages": [{
             "type": "text",
-            "text": "請選擇或輸入所需數量：",
+            "text": prompt_text.strip(),
             "quickReply": {"items": quick_reply_items}
         }]
     }

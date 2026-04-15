@@ -137,9 +137,24 @@ export default function App() {
           const nameBase = m[1].trim();
           const price = parseInt(m[2], 10);
           const extra = m[3] ? m[3].trim() : "";
-          items.push({ id: `T_D_N_${i}`, name: nameBase + extra, price: price, category: "晚餐單點" });
+          const fullName = nameBase + extra;
+
+          // 從完整品名(含備註)中，嘗試抓取「限量」或「只有」的數字
+          let limitCount = undefined;
+          const limitMatch = fullName.match(/(?:限量|只有)\s*(\d+)\s*(?:條|份|個|包|盒)?/);
+          if (limitMatch) {
+            limitCount = parseInt(limitMatch[1], 10); // 抓到數字
+          }
+
+          items.push({
+            id: `T_D_N_${i}`,
+            name: fullName,
+            price: price,
+            category: "晚餐單點",
+            limit: limitCount
+          });
         } else {
-          // 如果真的遇到完全看不懂的格式，就標記為需確認，不阻斷執行
+          // 如果真的遇到完全看不懂的格式，就標記為需確認
           items.push({ id: `T_D_ERR_${i}`, name: p, price: 0, category: "⚠️需確認" });
         }
       });
@@ -251,13 +266,22 @@ export default function App() {
     const selectedRegular = regularItems.filter((x) => selectedIds.has(x.itemId));
 
     // 將解析結果轉換為寫入格式
-    const formattedParsedItems = parsedItems.map((it, idx) => ({
-      itemId: `T_${meal}_${date.replaceAll("-", "")}_${idx}`,
-      name: it.name,
-      price: Number(it.price || 0),
-      sort: 9000 + idx,
-      category: it.category || "動態解析",
-    }));
+    const formattedParsedItems = parsedItems.map((it, idx) => {
+      const itemData = {
+        itemId: `T_${meal}_${date.replaceAll("-", "")}_${idx}`,
+        name: it.name,
+        price: Number(it.price || 0),
+        sort: 9000 + idx,
+        category: it.category || "動態解析",
+      };
+
+      // 如果解析時有抓到限量數字，就加入 limit 屬性
+      if (it.limit !== undefined) {
+        itemData.limit = it.limit;
+      }
+
+      return itemData;
+    });
 
     const finalItems = [
       ...selectedRegular.map((it) => ({
