@@ -141,7 +141,7 @@ export default function App() {
 
           // 從完整品名(含備註)中，嘗試抓取「限量」或「只有」的數字
           let limitCount = undefined;
-          const limitMatch = fullName.match(/(?:限量|只有)\s*(\d+)\s*(?:條|份|個|包|盒)?/);
+          const limitMatch = fullName.match(/(?:限量|只有|限)\s*(\d+)\s*(?:條|份|個|包|盒)?/);
           if (limitMatch) {
             limitCount = parseInt(limitMatch[1], 10); // 抓到數字
           }
