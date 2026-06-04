@@ -122,10 +122,40 @@ export default function App() {
             category: "湯品"
           });
         });
+
+        // 把這串字從原句中拔除
         remainingText = remainingText.replace(sMatch[0], "");
       }
 
-      // 3. 一般常規處理 (處理剩下的：百香柳橙乳酪吐司105，芋頭可頌60...)
+      // 3. 特殊處理：有/無 的組合變化 => 北部粽有蛋90、無蛋85
+      const withWithoutRegex = /([^，,。\n0-9]*?)有([^，,。\n0-9]+?)(\d+)\s*(?:元)?\s*[、/／]\s*無\2(\d+)\s*(?:元)?/g;
+      let wMatch;
+      while ((wMatch = withWithoutRegex.exec(remainingText)) !== null) {
+        const baseName = wMatch[1].trim(); // "北部粽"
+        const thing = wMatch[2].trim();    // "蛋"
+        const priceWith = parseInt(wMatch[3], 10);
+        const priceWithout = parseInt(wMatch[4], 10);
+
+        // 寫入「有」的品項
+        items.push({
+          id: `T_D_WITH_${baseName}_${thing}`,
+          name: `${baseName} 有${thing}`,
+          price: priceWith,
+          category: "晚餐單點"
+        });
+        // 寫入「無」的品項
+        items.push({
+          id: `T_D_WITHOUT_${baseName}_${thing}`,
+          name: `${baseName} 無${thing}`,
+          price: priceWithout,
+          category: "晚餐單點"
+        });
+
+        // 把這串字從原句中拔除 (使用 wMatch)
+        remainingText = remainingText.replace(wMatch[0], "");
+      }
+
+      // 4. 一般常規處理 (處理剩下的：百香柳橙乳酪吐司105，芋頭可頌60...)
       const parts = remainingText.split(/[,，。\n]/).filter(x => x.trim());
       parts.forEach((part, i) => {
         const p = part.trim();
