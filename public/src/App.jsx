@@ -45,6 +45,12 @@ export default function App() {
     let text = rawMessage.replace(/今天有/g, "").replace(/今天/g, "").replace(/謝謝/g, "").trim();
     if (!text) return [];
 
+    // 建立一個統一抓取限量的工具
+    const getLimit = (nameStr) => {
+      const lm = nameStr.match(/(?:限量|只有|限)\s*(\d+)\s*(?:條|份|個|包|盒)?/);
+      return lm ? parseInt(lm[1], 10) : undefined;
+    };
+
     if (meal === "LUNCH") {
       // --- 午餐解析邏輯 (固定 110 元) ---
       const parts = text.split(/[,，。\n]/).filter(x => x.trim());
@@ -141,21 +147,67 @@ export default function App() {
           id: `T_D_WITH_${baseName}_${thing}`,
           name: `${baseName} 有${thing}`,
           price: priceWith,
-          category: "晚餐單點"
+          category: "晚餐單點",
+          limit: getLimit(rawMessage)
         });
         // 寫入「無」的品項
         items.push({
           id: `T_D_WITHOUT_${baseName}_${thing}`,
           name: `${baseName} 無${thing}`,
           price: priceWithout,
-          category: "晚餐單點"
+          category: "晚餐單點",
+          limit: getLimit(rawMessage)
         });
 
         // 把這串字從原句中拔除 (使用 wMatch)
         remainingText = remainingText.replace(wMatch[0], "");
       }
 
-      // 4. 一般常規處理 (處理剩下的：百香柳橙乳酪吐司105，芋頭可頌60...)
+      // 4. 特殊處理：「都是」多品項同價
+      const allSameRegex = /([^，,。\n]+?)都是\s*(\d+)\s*(?:元)?/g;
+      let aMatch;
+      while ((aMatch = allSameRegex.exec(remainingText)) !== null) {
+        const itemsStr = aMatch[1].trim();
+        const price = parseInt(aMatch[2], 10);
+
+        // 根據頓號、逗號切開所有子品項
+        const subItems = itemsStr.split(/[、，,]/).map(x => x.trim()).filter(Boolean);
+
+        let suffix = "";
+        if (subItems.length > 0) {
+          const lastItem = subItems[subItems.length - 1];
+          const suffixMatch = lastItem.match(/([\u4e00-\u9fa5]+)$/);
+          if (suffixMatch) {
+            const potentialSuffix = suffixMatch[1];
+            suffix = potentialSuffix.length <= 3 ? potentialSuffix : potentialSuffix.slice(-2);
+          }
+        }
+
+        subItems.forEach((itemName, idx) => {
+          let finalName = itemName;
+          if (suffix && idx < subItems.length - 1 && !itemName.endsWith(suffix)) {
+            if (itemName.endsWith(suffix[0])) {
+              finalName = itemName + suffix.slice(1);
+            } else {
+              finalName = itemName + suffix;
+            }
+          }
+
+          items.push({
+            // 修正：補上 finalName 避免多行「都是」同價時產生的 id 重複衝突
+            id: `T_D_ALL_${price}_${finalName}_${idx}`,
+            name: finalName,
+            price: price,
+            category: "晚餐單點",
+            // 修正：改用 rawMessage 抓取完整的限量訊息
+            limit: getLimit(rawMessage)
+          });
+        });
+
+        remainingText = remainingText.replace(aMatch[0], "");
+      }
+
+      // 5. 一般常規處理 (處理剩下的：百香柳橙乳酪吐司105，芋頭可頌60...)
       const parts = remainingText.split(/[,，。\n]/).filter(x => x.trim());
       parts.forEach((part, i) => {
         const p = part.trim();
@@ -164,7 +216,8 @@ export default function App() {
         // 匹配 名稱 + 價格 + (可選備註)
         const m = p.match(/^(.+?)(\d+)([(（].*[)）])?$/);
         if (m) {
-          const nameBase = m[1].trim();
+          let nameBase = m[1].trim(); // ✨ 修正：將 const 改為 let，允許重新賦值
+          nameBase = nameBase.replace(/[\/／]$/, "").trim();
           const price = parseInt(m[2], 10);
           const extra = m[3] ? m[3].trim() : "";
           const fullName = nameBase + extra;
@@ -239,7 +292,7 @@ export default function App() {
       setRegularItems(items);
       setSelectedIds(new Set(items.map((x) => x.itemId)));
 
-      // 👇 儲存從 Google Sheets 拿到的廠商名稱
+      // 儲存從 Google Sheets 拿到的廠商名稱
       setVendor(data.vendor || "預設廠商");
 
       setMsg(`✅ 讀取完成：${items.length} 筆`, "success");
@@ -438,13 +491,14 @@ export default function App() {
               />
 
               {/* 2. 上層的自定義顯示：強制顯示變數中的 24 小時制數值 */}
+              {/* ✨ 順手把這裡無效的 Tailwind pointer-events-none 拔掉，因為下面 style 已經有寫 pointerEvents: 'none' */}
               <div
-                className="position-absolute top-50 start-0 translate-middle-y ps-3 pointer-events-none"
+                className="position-absolute top-50 start-0 translate-middle-y ps-3 pe-none"
                 style={{
                   pointerEvents: 'none', // 確保點擊時能穿透到下層的 input
                   fontSize: '1.1rem',
                   fontWeight: 'bold',
-                  color: '#0d6efd' // 氣象署專業藍
+                  color: '#0d6efd'
                 }}
               >
                 {deadlineTime}
@@ -464,7 +518,7 @@ export default function App() {
         </div>
       </div>
 
-      {/* 🚀 自動解析區塊 */}
+      {/* 自動解析區塊 */}
       <div className="card shadow-sm border-0 mb-3" style={{ background: "#eef2ff" }}>
         <div className="card-body">
           <div className="fw-bold fs-5 mb-2 text-primary">🤖 貼上訊息自動解析</div>
