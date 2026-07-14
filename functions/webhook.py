@@ -206,7 +206,10 @@ def line_webhook(req: https_fn.Request) -> Response:
                 _send_order_flex_message(reply_token, channel_access_token, meal_type)
 
             elif text in ["今日午餐", "今日晚餐"]:
-                _handle_show_menu(reply_token, text)
+                if event.get("source", {}).get("type") == "user":
+                    _handle_show_menu(reply_token, text)
+                else:
+                    _reply_text(reply_token, "⚠️ 請私訊小幫手來查看菜單與點餐喔！")
 
             elif text.startswith("手動輸入點餐 "):
                 service = _get_sheets_service()
